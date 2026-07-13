@@ -16,11 +16,10 @@ check:
     cargo test --workspace --all-targets
     uv run --no-sync ruff format --check .
     uv run --no-sync ruff check .
-    uv run --no-sync mypy
+    uv run --no-sync ty check --error-on-warning python tests
 
 test: native
     uv run --no-sync pytest -q
 
 full: check test
     uv build
-

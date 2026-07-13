@@ -20,9 +20,9 @@ dependencies = ["numpy>=2.5.1,<3"]
 [dependency-groups]
 dev = [
   "maturin==1.14.1",
-  "mypy==2.2.0",
   "pytest==9.1.1",
   "ruff==0.15.21",
+  "ty==0.0.58",
 ]
 
 [tool.maturin]
@@ -34,12 +34,6 @@ features = ["extension-module"]
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]
 testpaths = ["tests"]
-
-[tool.mypy]
-python_version = "3.14"
-strict = true
-packages = ["finoptions"]
-mypy_path = "python"
 
 [tool.ruff]
 target-version = "py314"
@@ -58,6 +52,13 @@ ignore = [
 
 [tool.ruff.format]
 docstring-code-format = true
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.rules]
+missing-type-argument = "error"
+possibly-unresolved-reference = "error"
 
 [tool.uv]
 cache-keys = [

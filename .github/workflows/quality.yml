@@ -54,7 +54,7 @@ jobs:
           uv run --no-sync ruff check .
 
       - name: Python strict types
-        run: uv run --no-sync mypy
+        run: uv run --no-sync ty check --error-on-warning python tests
 
       - name: Build native development package
         run: uv run --no-sync maturin develop --profile dev-fast
@@ -64,4 +64,3 @@ jobs:
 
       - name: Build release artifacts locally
         run: uv build
-

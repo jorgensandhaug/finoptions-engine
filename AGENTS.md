@@ -22,7 +22,7 @@ measured, and explicit.
 ## Supported workflow
 
 - `just fmt` formats Rust and Python.
-- `just check` runs formatting, release-quality lint, Rust tests, Python lint, and strict typing.
+- `just check` runs formatting, release-quality lint, Rust tests, Ruff, and strict `ty` checking.
 - `just test` builds the native extension through the locked environment and runs integration tests.
 - `just full` runs the complete current package gate.
 
@@ -34,4 +34,3 @@ pin with a removal trigger.
 Dependency direction is `core <- sim <- lsm <- python`; `testkit` is non-production validation.
 Resolve runtime choices outside hot loops. Keep native entry points private behind the typed Python
 facade. Add abstractions only for variation required by a validated workload.
-
