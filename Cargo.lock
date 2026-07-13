@@ -40,6 +40,7 @@ name = "finoptions-sim"
 version = "0.1.0"
 dependencies = [
  "finoptions-core",
+ "thiserror",
 ]
 
 [[package]]
