@@ -1,6 +1,5 @@
 /.venv/
 /.cache/
-/.mypy_cache/
 /.pytest_cache/
 /.ruff_cache/
 /target/
@@ -24,4 +23,3 @@
 .env
 .env.*
 !.env.example
-
