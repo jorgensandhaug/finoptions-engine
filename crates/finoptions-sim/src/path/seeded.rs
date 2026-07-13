@@ -192,7 +192,8 @@ impl GbmPathPlan {
 #[cfg(test)]
 mod tests {
     use finoptions_core::{
-        CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, LogDiscountCurve, TimeGrid,
+        CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy,
+        EventSchedule, LogDiscountCurve, TimeGrid,
     };
 
     use super::*;
@@ -201,6 +202,7 @@ mod tests {
     fn plan() -> GbmPathPlan {
         let grid = TimeGrid::try_new([0.0, 0.25, 0.5, 1.0]).unwrap();
         let curve = LogDiscountCurve::try_new(&grid, [0.0, -0.01, -0.02, -0.05]).unwrap();
+        let dividend_yield_curve = CumulativeDividendYieldCurve::try_new(&grid, [0.0; 4]).unwrap();
         let dividend = CashDividend::try_new(grid.node_id(2).unwrap(), 3.0).unwrap();
         let exercises = [grid.node_id(1).unwrap(), grid.node_id(2).unwrap()];
         let expiry = grid.node_id(3).unwrap();
@@ -208,6 +210,7 @@ mod tests {
         GbmPathPlan::try_new(
             &schedule,
             &curve,
+            &dividend_yield_curve,
             ConstantVolatility::try_new(0.20).unwrap(),
             DividendPolicy::Liquidator,
         )

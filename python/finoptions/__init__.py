@@ -32,6 +32,7 @@ from .lsm import (
 from .model import (
     CashDividend,
     ConstantVolatility,
+    CumulativeDividendYieldCurve,
     DividendPolicy,
     EventSchedule,
     InputError,
@@ -69,6 +70,7 @@ __all__ = [
     "CashDividend",
     "ConstantVolatility",
     "CpuExecutor",
+    "CumulativeDividendYieldCurve",
     "DividendBinSpec",
     "DividendPolicy",
     "EventSchedule",

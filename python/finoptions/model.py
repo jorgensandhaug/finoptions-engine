@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
+from math import copysign, isfinite
+from typing import Self, cast
 
 from . import _native
 
@@ -120,3 +121,52 @@ class LogDiscountCurve:
         times = _require_float_tuple(self.times, field="curve times")
         log_discounts = _require_float_tuple(self.log_discounts, field="log discounts")
         _native.validate_log_discount_curve(list(times), list(log_discounts))
+
+
+@dataclass(frozen=True, slots=True)
+class CumulativeDividendYieldCurve:
+    """Validated `Q(t) = integral_0^t q(u) du` values on an exact time grid.
+
+    The curve represents only a nonnegative continuous proportional dividend yield. Deterministic
+    cash dividends, financing, and borrow are separate inputs.
+    """
+
+    times: tuple[float, ...]
+    cumulative_yields: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        """Validate alignment, canonical origin, finiteness, monotonicity, and representation."""
+        times = _require_float_tuple(self.times, field="dividend-yield times")
+        cumulative_yields = _require_float_tuple(
+            self.cumulative_yields,
+            field="cumulative dividend yields",
+        )
+        _native.validate_cumulative_dividend_yield_curve(
+            list(times),
+            list(cumulative_yields),
+        )
+
+    @classmethod
+    def constant(cls, *, times: tuple[float, ...], annualized_decimal: float) -> Self:
+        """Construct the exact cumulative curve for one constant proportional dividend yield."""
+        if (
+            type(annualized_decimal) is not float
+            or not isfinite(annualized_decimal)
+            or annualized_decimal < 0.0
+            or (annualized_decimal == 0.0 and copysign(1.0, annualized_decimal) < 0.0)
+        ):
+            msg = (
+                "constant dividend yield must be a finite canonical nonnegative plain float; "
+                f"observed {annualized_decimal!r}"
+            )
+            raise InputError(msg)
+        checked_times = _require_float_tuple(times, field="dividend-yield times")
+        return cls(
+            times=checked_times,
+            cumulative_yields=tuple(annualized_decimal * time for time in checked_times),
+        )
+
+    @classmethod
+    def zero(cls, *, times: tuple[float, ...]) -> Self:
+        """Construct an explicit zero-continuous-dividend-yield curve."""
+        return cls.constant(times=times, annualized_decimal=0.0)

@@ -2,7 +2,8 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use finoptions_core::{
-    ConstantVolatility, DividendPolicy, EventSchedule, LogDiscountCurve, TimeGrid,
+    ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
+    LogDiscountCurve, TimeGrid,
 };
 use finoptions_sim::{CpuExecutor, GbmPathPlan, RandomStream};
 
@@ -22,6 +23,8 @@ fn plan() -> GbmPathPlan {
         .map(|&time| if time == 0.0 { 0.0 } else { -0.04 * time })
         .collect::<Vec<_>>();
     let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+    let dividend_yield_curve =
+        CumulativeDividendYieldCurve::try_new(&grid, vec![0.0; grid.len()]).unwrap();
     let exercise_nodes = (4..INTERVALS)
         .step_by(4)
         .map(|index| grid.node_id(index).unwrap())
@@ -31,6 +34,7 @@ fn plan() -> GbmPathPlan {
     GbmPathPlan::try_new(
         &schedule,
         &curve,
+        &dividend_yield_curve,
         ConstantVolatility::try_new(0.25).unwrap(),
         DividendPolicy::Liquidator,
     )

@@ -12,3 +12,4 @@ repository.
 - [ADR 0006: Independently fitted and evaluated call LSM](0006-independent-policy-lsm.md)
 - [ADR 0007: Shared explicit CPU runtime](0007-shared-explicit-cpu-runtime.md)
 - [ADR 0008: Ragged cash-dividend model tensors](0008-ragged-cash-dividend-tensors.md)
+- [ADR 0009: Explicit integrated continuous dividend yield](0009-explicit-continuous-dividend-yield.md)

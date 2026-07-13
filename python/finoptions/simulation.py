@@ -12,6 +12,7 @@ import numpy.typing as npt
 from . import _native
 from .model import (
     ConstantVolatility,
+    CumulativeDividendYieldCurve,
     DividendPolicy,
     EventSchedule,
     InputError,
@@ -128,9 +129,10 @@ class GbmPaths:
         return self.states[row]
 
 
-def _validate_simulation_specs(
+def _validate_simulation_specs(  # noqa: PLR0913 - financial inputs remain independently typed
     schedule: EventSchedule,
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     volatility: ConstantVolatility,
     dividend_policy: DividendPolicy,
     executor: CpuExecutor,
@@ -140,6 +142,12 @@ def _validate_simulation_specs(
         raise InputError(msg)
     if type(curve) is not LogDiscountCurve:
         msg = f"curve must be LogDiscountCurve; observed {type(curve).__name__}"
+        raise InputError(msg)
+    if type(dividend_yield_curve) is not CumulativeDividendYieldCurve:
+        msg = (
+            "dividend_yield_curve must be CumulativeDividendYieldCurve; "
+            f"observed {type(dividend_yield_curve).__name__}"
+        )
         raise InputError(msg)
     if type(volatility) is not ConstantVolatility:
         msg = f"volatility must be ConstantVolatility; observed {type(volatility).__name__}"
@@ -186,6 +194,7 @@ def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independen
     initial_spot: float,
     schedule: EventSchedule,
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     volatility: ConstantVolatility,
     dividend_policy: DividendPolicy,
     executor: CpuExecutor,
@@ -203,7 +212,14 @@ def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independen
 
     """
     _validate_initial_spot(initial_spot)
-    _validate_simulation_specs(schedule, curve, volatility, dividend_policy, executor)
+    _validate_simulation_specs(
+        schedule,
+        curve,
+        dividend_yield_curve,
+        volatility,
+        dividend_policy,
+        executor,
+    )
     _validate_normal_matrix(normals)
 
     states = _native.simulate_gbm_f64(
@@ -211,6 +227,8 @@ def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independen
         list(schedule.times),
         list(curve.times),
         list(curve.log_discounts),
+        list(dividend_yield_curve.times),
+        list(dividend_yield_curve.cumulative_yields),
         [dividend.node for dividend in schedule.dividends],
         [dividend.amount for dividend in schedule.dividends],
         list(schedule.exercise_nodes),
@@ -228,6 +246,7 @@ def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is ind
     initial_spot: float,
     schedule: EventSchedule,
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     volatility: ConstantVolatility,
     dividend_policy: DividendPolicy,
     executor: CpuExecutor,
@@ -247,7 +266,14 @@ def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is ind
 
     """
     _validate_initial_spot(initial_spot)
-    _validate_simulation_specs(schedule, curve, volatility, dividend_policy, executor)
+    _validate_simulation_specs(
+        schedule,
+        curve,
+        dividend_yield_curve,
+        volatility,
+        dividend_policy,
+        executor,
+    )
     if type(paths) is not int or not 1 <= paths <= _MAX_PATHS:
         msg = f"paths must be a plain int in [1, {_MAX_PATHS}]; observed {paths!r}"
         raise InputError(msg)
@@ -260,6 +286,8 @@ def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is ind
         list(schedule.times),
         list(curve.times),
         list(curve.log_discounts),
+        list(dividend_yield_curve.times),
+        list(dividend_yield_curve.cumulative_yields),
         [dividend.node for dividend in schedule.dividends],
         [dividend.amount for dividend in schedule.dividends],
         list(schedule.exercise_nodes),

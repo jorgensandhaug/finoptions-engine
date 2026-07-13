@@ -1,6 +1,6 @@
 # ADR 0002: Exact adjacent-node GBM transition
 
-Status: accepted for the first market model
+Status: accepted for the zero-yield case; extended by ADR 0009
 
 Between ordered financial events, the first engine slice uses risk-neutral GBM with zero continuous
 yield/borrow, deterministic node discount factors, and strictly positive constant annualized

@@ -5,8 +5,8 @@ mod seeded;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use finoptions_core::{
-    CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, LogDiscountCurve, NodeId,
-    TimeGrid,
+    CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
+    LogDiscountCurve, NodeId, TimeGrid,
 };
 use rayon::prelude::*;
 
@@ -16,6 +16,7 @@ use crate::{GbmStep, RandomStream, SimulationError};
 #[derive(Clone, Debug, PartialEq)]
 pub struct GbmPathPlan {
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     steps: Box<[GbmStep]>,
     dividends_by_node: Box<[Option<CashDividend>]>,
     observation_nodes: Box<[NodeId]>,
@@ -35,11 +36,15 @@ impl GbmPathPlan {
     pub fn try_new(
         schedule: &EventSchedule,
         curve: &LogDiscountCurve,
+        dividend_yield_curve: &CumulativeDividendYieldCurve,
         volatility: ConstantVolatility,
         dividend_policy: DividendPolicy,
     ) -> Result<Self, SimulationError> {
         if schedule.grid() != curve.grid() {
             return Err(SimulationError::TimeGridMismatch);
+        }
+        if schedule.grid() != dividend_yield_curve.grid() {
+            return Err(SimulationError::DividendYieldTimeGridMismatch);
         }
 
         let grid = schedule.grid();
@@ -47,6 +52,7 @@ impl GbmPathPlan {
         for to_index in 1..grid.len() {
             steps.push(GbmStep::try_new(
                 curve,
+                dividend_yield_curve,
                 grid.node_id(to_index - 1)?,
                 grid.node_id(to_index)?,
                 volatility,
@@ -64,6 +70,7 @@ impl GbmPathPlan {
 
         Ok(Self {
             curve: curve.clone(),
+            dividend_yield_curve: dividend_yield_curve.clone(),
             steps: steps.into_boxed_slice(),
             dividends_by_node: dividends_by_node.into_boxed_slice(),
             observation_nodes: observation_nodes.into_boxed_slice(),
@@ -81,6 +88,12 @@ impl GbmPathPlan {
     #[must_use]
     pub const fn curve(&self) -> &LogDiscountCurve {
         &self.curve
+    }
+
+    /// Borrows the exact cumulative proportional-dividend yield used by every transition.
+    #[must_use]
+    pub const fn dividend_yield_curve(&self) -> &CumulativeDividendYieldCurve {
+        &self.dividend_yield_curve
     }
 
     /// Borrows exercise nodes followed by terminal expiry.
@@ -394,6 +407,12 @@ impl SimulatedPaths {
         self.plan.curve()
     }
 
+    /// Borrows the exact cumulative proportional-dividend yield used by the path dynamics.
+    #[must_use]
+    pub const fn dividend_yield_curve(&self) -> &CumulativeDividendYieldCurve {
+        self.plan.dividend_yield_curve()
+    }
+
     /// Returns the exact seeded namespace, or `None` for externally supplied normal variates.
     #[must_use]
     pub const fn random_stream(&self) -> Option<RandomStream> {
@@ -452,6 +471,8 @@ mod tests {
     ) -> GbmPathPlan {
         let grid = TimeGrid::try_new(times).unwrap();
         let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&grid, vec![0.0; grid.len()]).unwrap();
         let dividends = dividend
             .map(|(node, amount)| {
                 vec![CashDividend::try_new(grid.node_id(node).unwrap(), amount).unwrap()]
@@ -466,6 +487,7 @@ mod tests {
         GbmPathPlan::try_new(
             &schedule,
             &curve,
+            &dividend_yield_curve,
             ConstantVolatility::try_new(0.20).unwrap(),
             policy,
         )
@@ -510,6 +532,7 @@ mod tests {
         let curve = LogDiscountCurve::try_new(plan.grid(), [0.0, -0.01, -0.02, -0.05]).unwrap();
         let first_step = GbmStep::try_new(
             &curve,
+            plan.dividend_yield_curve(),
             plan.grid().node_id(0).unwrap(),
             plan.grid().node_id(1).unwrap(),
             ConstantVolatility::try_new(0.20).unwrap(),
@@ -602,6 +625,44 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_dividend_yield_telescopes_separately_from_risk_free_discounting() {
+        let times = [0.0, 0.2, 0.7, 1.0];
+        let log_discounts = [0.0, -0.009, -0.031, -0.047];
+        let cumulative_yields = [0.0, 0.004, 0.018, 0.025];
+        let grid = TimeGrid::try_new(times).unwrap();
+        let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&grid, cumulative_yields).unwrap();
+        let expiry = grid.node_id(grid.len() - 1).unwrap();
+        let schedule = EventSchedule::try_new(grid, [], [], expiry).unwrap();
+        let volatility = ConstantVolatility::try_new(0.20).unwrap();
+        let plan = GbmPathPlan::try_new(
+            &schedule,
+            &curve,
+            &dividend_yield_curve,
+            volatility,
+            DividendPolicy::Liquidator,
+        )
+        .unwrap();
+        let normals = [0.2, -1.1, 0.7];
+        let observed = plan.simulate(83.0, 1, &normals).unwrap().as_slice()[0];
+        let diffusion_sum = times
+            .windows(2)
+            .enumerate()
+            .map(|(interval, pair)| {
+                volatility.get() * (pair[1] - pair[0]).sqrt() * normals[interval]
+            })
+            .sum::<f64>();
+        let expected = 83.0
+            * (-log_discounts[3]
+                - cumulative_yields[3]
+                - 0.5 * volatility.get().powi(2) * times[3]
+                + diffusion_sum)
+                .exp();
+        assert!((observed - expected).abs() <= 32.0 * f64::EPSILON * expected);
+    }
+
+    #[test]
     fn rejects_grid_mismatch() {
         let schedule_grid = TimeGrid::try_new([0.0, 0.5, 1.0]).unwrap();
         let curve_grid = TimeGrid::try_new([0.0, 0.25, 1.0]).unwrap();
@@ -613,15 +674,34 @@ mod tests {
         )
         .unwrap();
         let curve = LogDiscountCurve::try_new(&curve_grid, [0.0, -0.01, -0.05]).unwrap();
+        let schedule_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&schedule_grid, [0.0; 3]).unwrap();
         assert_eq!(
             GbmPathPlan::try_new(
                 &schedule,
                 &curve,
+                &schedule_yield_curve,
                 ConstantVolatility::try_new(0.20).unwrap(),
                 DividendPolicy::Liquidator,
             )
             .unwrap_err(),
             SimulationError::TimeGridMismatch
+        );
+
+        let schedule_curve =
+            LogDiscountCurve::try_new(&schedule_grid, [0.0, -0.02, -0.05]).unwrap();
+        let mismatched_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&curve_grid, [0.0; 3]).unwrap();
+        assert_eq!(
+            GbmPathPlan::try_new(
+                &schedule,
+                &schedule_curve,
+                &mismatched_yield_curve,
+                ConstantVolatility::try_new(0.20).unwrap(),
+                DividendPolicy::Liquidator,
+            )
+            .unwrap_err(),
+            SimulationError::DividendYieldTimeGridMismatch
         );
     }
 

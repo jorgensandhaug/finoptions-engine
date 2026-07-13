@@ -8,8 +8,8 @@ use finoptions_batch::{
     pack_padded_dividends_f32 as core_pack_padded_dividends_f32,
 };
 use finoptions_core::{
-    CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, InputError as CoreInputError,
-    LogDiscountCurve, TimeGrid,
+    CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
+    InputError as CoreInputError, LogDiscountCurve, TimeGrid,
 };
 use finoptions_lsm::{
     ExerciseFitDiagnostics as CoreExerciseFitDiagnostics, ExerciseTieRule as CoreExerciseTieRule,
@@ -366,11 +366,25 @@ fn validate_log_discount_curve(times: Vec<f64>, log_discounts: Vec<f64>) -> PyRe
         .map_err(CoreInputError::into_py_input_error)
 }
 
+/// Validates node-aligned cumulative continuous proportional-dividend yields.
+#[pyfunction]
+fn validate_cumulative_dividend_yield_curve(
+    times: Vec<f64>,
+    cumulative_yields: Vec<f64>,
+) -> PyResult<()> {
+    let grid = TimeGrid::try_new(times).map_err(CoreInputError::into_py_input_error)?;
+    CumulativeDividendYieldCurve::try_new(&grid, cumulative_yields)
+        .map(|_| ())
+        .map_err(CoreInputError::into_py_input_error)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_gbm_plan(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
     dividend_nodes: Vec<u32>,
     dividend_amounts: Vec<f64>,
     exercise_nodes: Vec<u32>,
@@ -382,6 +396,8 @@ fn parse_gbm_plan(
         schedule_times,
         curve_times,
         log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
         dividend_nodes,
         dividend_amounts,
         exercise_nodes,
@@ -397,6 +413,8 @@ fn parse_gbm_model(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
     dividend_nodes: Vec<u32>,
     dividend_amounts: Vec<f64>,
     exercise_nodes: Vec<u32>,
@@ -415,6 +433,11 @@ fn parse_gbm_model(
     let curve_grid = TimeGrid::try_new(curve_times).map_err(CoreInputError::into_py_input_error)?;
     let curve = LogDiscountCurve::try_new(&curve_grid, log_discounts)
         .map_err(CoreInputError::into_py_input_error)?;
+    let dividend_yield_grid =
+        TimeGrid::try_new(dividend_yield_times).map_err(CoreInputError::into_py_input_error)?;
+    let dividend_yield_curve =
+        CumulativeDividendYieldCurve::try_new(&dividend_yield_grid, cumulative_dividend_yields)
+            .map_err(CoreInputError::into_py_input_error)?;
     let volatility = ConstantVolatility::try_new(annualized_volatility)
         .map_err(CoreInputError::into_py_input_error)?;
     let policy = match dividend_policy {
@@ -426,7 +449,7 @@ fn parse_gbm_model(
             )));
         }
     };
-    let plan = GbmPathPlan::try_new(&schedule, &curve, volatility, policy)
+    let plan = GbmPathPlan::try_new(&schedule, &curve, &dividend_yield_curve, volatility, policy)
         .map_err(CoreSimulationError::into_py_simulation_error)?;
     Ok((plan, curve))
 }
@@ -451,6 +474,8 @@ fn simulate_gbm_f64<'py>(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
     dividend_nodes: Vec<u32>,
     dividend_amounts: Vec<f64>,
     exercise_nodes: Vec<u32>,
@@ -464,6 +489,8 @@ fn simulate_gbm_f64<'py>(
         schedule_times,
         curve_times,
         log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
         dividend_nodes,
         dividend_amounts,
         exercise_nodes,
@@ -498,6 +525,8 @@ fn simulate_gbm_seeded_f64<'py>(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
     dividend_nodes: Vec<u32>,
     dividend_amounts: Vec<f64>,
     exercise_nodes: Vec<u32>,
@@ -513,6 +542,8 @@ fn simulate_gbm_seeded_f64<'py>(
         schedule_times,
         curve_times,
         log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
         dividend_nodes,
         dividend_amounts,
         exercise_nodes,
@@ -629,6 +660,8 @@ fn price_lsm_call_seeded_f64<'py>(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
     dividend_nodes: Vec<u32>,
     dividend_amounts: Vec<f64>,
     exercise_nodes: Vec<u32>,
@@ -651,6 +684,8 @@ fn price_lsm_call_seeded_f64<'py>(
         schedule_times,
         curve_times,
         log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
         dividend_nodes,
         dividend_amounts,
         exercise_nodes,
@@ -710,6 +745,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;
     module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        validate_cumulative_dividend_yield_curve,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(validate_event_schedule, module)?)?;
     module.add_function(wrap_pyfunction!(validate_log_discount_curve, module)?)?;
     module.add_function(wrap_pyfunction!(

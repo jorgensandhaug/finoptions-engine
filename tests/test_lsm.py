@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from math import erfc, exp, log, sqrt
 from typing import cast
 
 import pytest
@@ -9,6 +10,7 @@ from finoptions import (
     CashDividend,
     ConstantVolatility,
     CpuExecutor,
+    CumulativeDividendYieldCurve,
     DividendPolicy,
     EventSchedule,
     ExerciseTieRule,
@@ -25,6 +27,12 @@ from finoptions import (
 EVALUATION_PATHS = 32_768
 BASIS_COLUMNS = 5
 ORIGIN_EXERCISE_VALUE = 100.0
+ANALYTICAL_PATHS = 131_072
+
+
+def zero_yield(schedule: EventSchedule) -> CumulativeDividendYieldCurve:
+    """Build the explicit zero continuous proportional-dividend-yield input."""
+    return CumulativeDividendYieldCurve.zero(times=schedule.times)
 
 
 def one_dividend_inputs() -> tuple[EventSchedule, LogDiscountCurve, ConstantVolatility]:
@@ -56,6 +64,11 @@ def method(*, paths: int = EVALUATION_PATHS) -> Lsm:
     )
 
 
+def standard_normal_cdf(value: float) -> float:
+    """Evaluate the standard normal CDF independently of the native engine."""
+    return 0.5 * erfc(-value / sqrt(2.0))
+
+
 def test_public_lsm_is_thread_invariant_and_returns_complete_diagnostics() -> None:
     """Worker scheduling does not alter the fixed policy, payoff mean, or diagnostics."""
     schedule, curve, volatility = one_dividend_inputs()
@@ -65,6 +78,7 @@ def test_public_lsm_is_thread_invariant_and_returns_complete_diagnostics() -> No
         "strike": 100.0,
         "schedule": schedule,
         "curve": curve,
+        "dividend_yield_curve": zero_yield(schedule),
         "volatility": volatility,
         "dividend_policy": DividendPolicy.LIQUIDATOR,
         "method": lsm_method,
@@ -101,6 +115,7 @@ def test_origin_exercise_is_reported_as_one_common_decision() -> None:
         strike=100.0,
         schedule=schedule,
         curve=curve,
+        dividend_yield_curve=zero_yield(schedule),
         volatility=ConstantVolatility(0.30),
         dividend_policy=DividendPolicy.LIQUIDATOR,
         executor=CpuExecutor(threads=2),
@@ -111,6 +126,51 @@ def test_origin_exercise_is_reported_as_one_common_decision() -> None:
     origin = result.fit_diagnostics[0]
     assert isinstance(origin, OriginDecisionDiagnostics)
     assert origin.exercise
+
+
+def test_continuous_yield_european_slice_covers_the_exact_analytical_value() -> None:
+    """Risk-neutral yield dynamics and risk-free payoff discounting compose correctly."""
+    spot = 100.0
+    strike = 105.0
+    rate = 0.05
+    dividend_yield = 0.02
+    volatility = 0.25
+    maturity = 1.25
+    schedule = EventSchedule(
+        times=(0.0, maturity),
+        dividends=(),
+        exercise_nodes=(),
+        expiry_node=1,
+    )
+    curve = LogDiscountCurve(
+        times=schedule.times,
+        log_discounts=(0.0, -rate * maturity),
+    )
+    result = price_lsm_call(
+        initial_spot=spot,
+        strike=strike,
+        schedule=schedule,
+        curve=curve,
+        dividend_yield_curve=CumulativeDividendYieldCurve.constant(
+            times=schedule.times,
+            annualized_decimal=dividend_yield,
+        ),
+        volatility=ConstantVolatility(volatility),
+        dividend_policy=DividendPolicy.LIQUIDATOR,
+        executor=CpuExecutor(threads=4),
+        method=method(paths=ANALYTICAL_PATHS),
+    )
+    sigma_root_time = volatility * sqrt(maturity)
+    d1 = (
+        log(spot / strike) + (rate - dividend_yield + 0.5 * volatility**2) * maturity
+    ) / sigma_root_time
+    d2 = d1 - sigma_root_time
+    expected = spot * exp(-dividend_yield * maturity) * standard_normal_cdf(d1) - strike * exp(
+        -rate * maturity
+    ) * standard_normal_cdf(d2)
+    assert result.standard_error is not None
+    assert abs(result.price - expected) <= 5.0 * result.standard_error
+    assert result.fit_diagnostics == ()
 
 
 def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None:
@@ -149,6 +209,7 @@ def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None
             strike=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=1),

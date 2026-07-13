@@ -58,6 +58,9 @@ def pack_padded_dividends_f32(
 ]: ...
 def validate_cash_dividend_amount(amount: float) -> None: ...
 def validate_constant_volatility(annualized_decimal: float) -> None: ...
+def validate_cumulative_dividend_yield_curve(
+    times: list[float], cumulative_yields: list[float]
+) -> None: ...
 def validate_event_schedule(
     times: list[float],
     dividend_nodes: list[int],
@@ -76,6 +79,8 @@ def simulate_gbm_f64(
     schedule_times: list[float],
     curve_times: list[float],
     log_discounts: list[float],
+    dividend_yield_times: list[float],
+    cumulative_dividend_yields: list[float],
     dividend_nodes: list[int],
     dividend_amounts: list[float],
     exercise_nodes: list[int],
@@ -90,6 +95,8 @@ def simulate_gbm_seeded_f64(
     schedule_times: list[float],
     curve_times: list[float],
     log_discounts: list[float],
+    dividend_yield_times: list[float],
+    cumulative_dividend_yields: list[float],
     dividend_nodes: list[int],
     dividend_amounts: list[float],
     exercise_nodes: list[int],
@@ -107,6 +114,8 @@ def price_lsm_call_seeded_f64(
     schedule_times: list[float],
     curve_times: list[float],
     log_discounts: list[float],
+    dividend_yield_times: list[float],
+    cumulative_dividend_yields: list[float],
     dividend_nodes: list[int],
     dividend_amounts: list[float],
     exercise_nodes: list[int],

@@ -1,13 +1,13 @@
 //! One exact geometric-Brownian-motion transition.
 
-use finoptions_core::{ConstantVolatility, LogDiscountCurve, NodeId};
+use finoptions_core::{ConstantVolatility, CumulativeDividendYieldCurve, LogDiscountCurve, NodeId};
 
 use crate::SimulationError;
 
 /// Precomputed exact GBM coefficients for one adjacent event interval.
 ///
-/// Under zero continuous yield/borrow, deterministic discount factors, and constant volatility,
-/// the pre-event state at the next node is
+/// Under a deterministic continuous proportional-dividend yield, deterministic discount factors,
+/// and constant volatility, the pre-event state at the next node is
 /// `S_next = S_after * exp(log_drift + diffusion * Z)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GbmStep {
@@ -18,7 +18,7 @@ pub struct GbmStep {
 }
 
 impl GbmStep {
-    /// Precomputes one exact adjacent-node transition from a validated curve and volatility.
+    /// Precomputes one exact adjacent-node transition from validated curves and volatility.
     ///
     /// # Errors
     ///
@@ -26,10 +26,14 @@ impl GbmStep {
     /// and increasing.
     pub fn try_new(
         curve: &LogDiscountCurve,
+        dividend_yield_curve: &CumulativeDividendYieldCurve,
         from: NodeId,
         to: NodeId,
         volatility: ConstantVolatility,
     ) -> Result<Self, SimulationError> {
+        if curve.grid() != dividend_yield_curve.grid() {
+            return Err(SimulationError::DividendYieldTimeGridMismatch);
+        }
         if from.get().checked_add(1) != Some(to.get()) {
             return Err(SimulationError::NonAdjacentNodes {
                 from: from.get(),
@@ -40,8 +44,9 @@ impl GbmStep {
         let to_time = curve.grid().time(to)?;
         let dt = to_time - from_time;
         let interval_log_discount = curve.interval_log_discount(from, to)?;
+        let interval_dividend_yield = dividend_yield_curve.interval_yield(from, to)?;
         let variance = volatility.get().mul_add(volatility.get(), 0.0) * dt;
-        let log_drift = -interval_log_discount - 0.5 * variance;
+        let log_drift = -interval_log_discount - interval_dividend_yield - 0.5 * variance;
         let diffusion = variance.sqrt();
         Ok(Self {
             from,
@@ -122,8 +127,11 @@ mod tests {
     fn step(log_discount_at_one: f64, sigma: f64) -> GbmStep {
         let grid = TimeGrid::try_new([0.0, 1.0]).unwrap();
         let curve = LogDiscountCurve::try_new(&grid, [0.0, log_discount_at_one]).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&grid, [0.0, 0.0]).unwrap();
         GbmStep::try_new(
             &curve,
+            &dividend_yield_curve,
             grid.node_id(0).unwrap(),
             grid.node_id(1).unwrap(),
             ConstantVolatility::try_new(sigma).unwrap(),
@@ -151,6 +159,24 @@ mod tests {
     }
 
     #[test]
+    fn subtracts_only_the_integrated_continuous_dividend_yield_from_drift() {
+        let grid = TimeGrid::try_new([0.0, 1.0]).unwrap();
+        let curve = LogDiscountCurve::try_new(&grid, [0.0, -0.05]).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&grid, [0.0, 0.02]).unwrap();
+        let step = GbmStep::try_new(
+            &curve,
+            &dividend_yield_curve,
+            grid.node_id(0).unwrap(),
+            grid.node_id(1).unwrap(),
+            ConstantVolatility::try_new(0.20).unwrap(),
+        )
+        .unwrap();
+        let expected = 0.05 - 0.02 - 0.5 * 0.20_f64.powi(2);
+        assert!((step.log_drift() - expected).abs() <= 8.0 * f64::EPSILON);
+    }
+
+    #[test]
     fn preserves_absorbing_zero_and_rejects_nonfinite_inputs() {
         let step = step(-0.05, 0.20);
         assert_eq!(
@@ -171,8 +197,10 @@ mod tests {
     fn rejects_skipped_nodes() {
         let grid = TimeGrid::try_new([0.0, 0.5, 1.0]).unwrap();
         let curve = LogDiscountCurve::try_new(&grid, [0.0, -0.02, -0.05]).unwrap();
+        let dividend_yield_curve = CumulativeDividendYieldCurve::try_new(&grid, [0.0; 3]).unwrap();
         let result = GbmStep::try_new(
             &curve,
+            &dividend_yield_curve,
             grid.node_id(0).unwrap(),
             grid.node_id(2).unwrap(),
             ConstantVolatility::try_new(0.20).unwrap(),

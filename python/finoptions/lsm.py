@@ -8,7 +8,14 @@ from math import isfinite
 from typing import Final
 
 from . import _native
-from .model import ConstantVolatility, DividendPolicy, EventSchedule, InputError, LogDiscountCurve
+from .model import (
+    ConstantVolatility,
+    CumulativeDividendYieldCurve,
+    DividendPolicy,
+    EventSchedule,
+    InputError,
+    LogDiscountCurve,
+)
 from .simulation import CpuExecutor, RandomStream
 
 LsmError = _native.LsmError
@@ -197,6 +204,7 @@ def _validate_specs(  # noqa: PLR0913 - financial inputs remain independently ty
     strike: float,
     schedule: EventSchedule,
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     volatility: ConstantVolatility,
     dividend_policy: DividendPolicy,
     executor: CpuExecutor,
@@ -211,6 +219,12 @@ def _validate_specs(  # noqa: PLR0913 - financial inputs remain independently ty
         raise InputError(msg)
     if type(curve) is not LogDiscountCurve:
         msg = f"curve must be LogDiscountCurve; observed {type(curve).__name__}"
+        raise InputError(msg)
+    if type(dividend_yield_curve) is not CumulativeDividendYieldCurve:
+        msg = (
+            "dividend_yield_curve must be CumulativeDividendYieldCurve; "
+            f"observed {type(dividend_yield_curve).__name__}"
+        )
         raise InputError(msg)
     if type(volatility) is not ConstantVolatility:
         msg = f"volatility must be ConstantVolatility; observed {type(volatility).__name__}"
@@ -232,6 +246,7 @@ def price_lsm_call(  # noqa: PLR0913 - financial inputs remain independently typ
     strike: float,
     schedule: EventSchedule,
     curve: LogDiscountCurve,
+    dividend_yield_curve: CumulativeDividendYieldCurve,
     volatility: ConstantVolatility,
     dividend_policy: DividendPolicy,
     executor: CpuExecutor,
@@ -253,6 +268,7 @@ def price_lsm_call(  # noqa: PLR0913 - financial inputs remain independently typ
         strike=strike,
         schedule=schedule,
         curve=curve,
+        dividend_yield_curve=dividend_yield_curve,
         volatility=volatility,
         dividend_policy=dividend_policy,
         executor=executor,
@@ -264,6 +280,8 @@ def price_lsm_call(  # noqa: PLR0913 - financial inputs remain independently typ
         list(schedule.times),
         list(curve.times),
         list(curve.log_discounts),
+        list(dividend_yield_curve.times),
+        list(dividend_yield_curve.cumulative_yields),
         [dividend.node for dividend in schedule.dividends],
         [dividend.amount for dividend in schedule.dividends],
         list(schedule.exercise_nodes),

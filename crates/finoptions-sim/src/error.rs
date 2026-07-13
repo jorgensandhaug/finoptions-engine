@@ -24,6 +24,10 @@ pub enum SimulationError {
     #[error("discount curve and event schedule must use the identical time grid")]
     TimeGridMismatch,
 
+    /// Continuous dividend-yield curve and event schedule use different time grids.
+    #[error("continuous dividend-yield curve and event schedule must use the identical time grid")]
+    DividendYieldTimeGridMismatch,
+
     /// A simulation requested no paths.
     #[error("simulation path count must be positive")]
     EmptyPathSet,

@@ -64,6 +64,31 @@ def test_curve_supports_negative_rates_but_rejects_bad_origin() -> None:
         finoptions.LogDiscountCurve(times=(0.0, 1.0), log_discounts=(-0.0, -0.01))
 
 
+def test_continuous_dividend_yield_requires_explicit_integrated_semantics() -> None:
+    """Constant helpers integrate exactly while malformed or negative yields fail."""
+    times = (0.0, 0.25, 1.0)
+    curve = finoptions.CumulativeDividendYieldCurve.constant(
+        times=times,
+        annualized_decimal=0.04,
+    )
+    assert curve.cumulative_yields == (0.0, 0.01, 0.04)
+    assert finoptions.CumulativeDividendYieldCurve.zero(times=times).cumulative_yields == (
+        0.0,
+        0.0,
+        0.0,
+    )
+    with pytest.raises(finoptions.InputError, match="nondecreasing"):
+        finoptions.CumulativeDividendYieldCurve(
+            times=times,
+            cumulative_yields=(0.0, 0.02, 0.01),
+        )
+    with pytest.raises(finoptions.InputError, match="finite canonical nonnegative"):
+        finoptions.CumulativeDividendYieldCurve.constant(
+            times=times,
+            annualized_decimal=-0.01,
+        )
+
+
 def test_volatility_is_explicitly_an_annualized_decimal() -> None:
     """The facade never guesses percentages and rejects the unsupported deterministic limit."""
     expected = 0.20

@@ -12,6 +12,7 @@ from finoptions import (
     CashDividend,
     ConstantVolatility,
     CpuExecutor,
+    CumulativeDividendYieldCurve,
     DividendPolicy,
     EventSchedule,
     GbmPaths,
@@ -25,6 +26,11 @@ from finoptions import (
 
 PATHS = 2
 TAIL_THRESHOLD = 3.0
+
+
+def zero_yield(schedule: EventSchedule) -> CumulativeDividendYieldCurve:
+    """Build the explicit zero continuous proportional-dividend-yield input."""
+    return CumulativeDividendYieldCurve.zero(times=schedule.times)
 
 
 def inputs(
@@ -58,6 +64,7 @@ def test_matches_independent_adjacent_transition_and_time_major_layout() -> None
         initial_spot=100.0,
         schedule=schedule,
         curve=curve,
+        dividend_yield_curve=zero_yield(schedule),
         volatility=volatility,
         dividend_policy=DividendPolicy.LIQUIDATOR,
         executor=CpuExecutor(threads=1),
@@ -95,6 +102,7 @@ def test_observes_pre_dividend_exercise_state_and_uses_post_dividend_state_after
         initial_spot=100.0,
         schedule=schedule,
         curve=curve,
+        dividend_yield_curve=zero_yield(schedule),
         volatility=volatility,
         dividend_policy=DividendPolicy.LIQUIDATOR,
         executor=CpuExecutor(threads=1),
@@ -111,6 +119,7 @@ def test_rejects_implicit_array_conversion_and_nonfinite_values() -> None:
         "initial_spot": 100.0,
         "schedule": schedule,
         "curve": curve,
+        "dividend_yield_curve": zero_yield(schedule),
         "volatility": volatility,
         "dividend_policy": DividendPolicy.LIQUIDATOR,
         "executor": CpuExecutor(threads=1),
@@ -134,6 +143,7 @@ def test_distinguishes_invalid_input_from_numerical_transition_failure() -> None
             initial_spot=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=1),
@@ -147,6 +157,7 @@ def test_distinguishes_invalid_input_from_numerical_transition_failure() -> None
             initial_spot=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=1),
@@ -165,6 +176,7 @@ def test_explicit_parallel_executor_is_bitwise_identical_to_serial() -> None:
         "initial_spot": 100.0,
         "schedule": schedule,
         "curve": curve,
+        "dividend_yield_curve": zero_yield(schedule),
         "volatility": volatility,
         "dividend_policy": DividendPolicy.LIQUIDATOR,
         "normals": normals,
@@ -190,6 +202,7 @@ def test_executor_and_parallel_failure_reporting_are_strict_and_deterministic() 
             initial_spot=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=2),
@@ -206,6 +219,7 @@ def test_seeded_paths_preserve_stream_identity_across_workers_and_batch_sizes() 
             initial_spot=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=executor,
@@ -245,6 +259,7 @@ def test_seeded_public_contract_rejects_implicit_or_ambiguous_inputs() -> None:
             initial_spot=100.0,
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=1),
@@ -270,11 +285,16 @@ def test_seeded_normal_transform_and_risk_neutral_terminal_moment() -> None:
         expiry_node=1,
     )
     curve = LogDiscountCurve(times=(0.0, 1.0), log_discounts=(0.0, -0.05))
+    dividend_yield_curve = CumulativeDividendYieldCurve.constant(
+        times=schedule.times,
+        annualized_decimal=0.02,
+    )
     volatility = ConstantVolatility(0.20)
     result = simulate_gbm_seeded(
         initial_spot=100.0,
         schedule=schedule,
         curve=curve,
+        dividend_yield_curve=dividend_yield_curve,
         volatility=volatility,
         dividend_policy=DividendPolicy.LIQUIDATOR,
         executor=CpuExecutor(threads=4),
@@ -282,7 +302,7 @@ def test_seeded_normal_transform_and_risk_neutral_terminal_moment() -> None:
         random_stream=RandomStream(seed=0x01D6328F7A4C915B, domain=0x17290042),
     )
     terminal = result.states[0]
-    normals = (np.log(terminal / 100.0) - (0.05 - 0.5 * 0.20**2)) / 0.20
+    normals = (np.log(terminal / 100.0) - (0.05 - 0.02 - 0.5 * 0.20**2)) / 0.20
 
     mean_tolerance = 5.0 / sqrt(paths)
     variance_tolerance = 5.0 * sqrt(2.0 / (paths - 1))
@@ -295,8 +315,8 @@ def test_seeded_normal_transform_and_risk_neutral_terminal_moment() -> None:
     tail_standard_deviation = sqrt(paths * tail_probability * (1.0 - tail_probability))
     assert abs(tail_count - expected_tail_count) <= 6.0 * tail_standard_deviation
 
-    expected_terminal_mean = 100.0 * exp(0.05)
-    terminal_variance = 100.0**2 * exp(2.0 * 0.05) * (exp(0.20**2) - 1.0)
+    expected_terminal_mean = 100.0 * exp(0.05 - 0.02)
+    terminal_variance = 100.0**2 * exp(2.0 * (0.05 - 0.02)) * (exp(0.20**2) - 1.0)
     terminal_standard_error = sqrt(terminal_variance / paths)
     assert abs(float(np.mean(terminal)) - expected_terminal_mean) <= 5.0 * terminal_standard_error
 
@@ -309,6 +329,7 @@ def test_seeded_parallel_transition_failure_reports_lowest_path() -> None:
             initial_spot=float.fromhex("0x1.fffffffffffffp+1023"),
             schedule=schedule,
             curve=curve,
+            dividend_yield_curve=zero_yield(schedule),
             volatility=volatility,
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=4),

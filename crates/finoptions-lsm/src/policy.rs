@@ -819,7 +819,8 @@ fn external_population_digest(paths: &SimulatedPaths) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use finoptions_core::{
-        CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, TimeGrid,
+        CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy,
+        EventSchedule, TimeGrid,
     };
 
     use super::*;
@@ -843,6 +844,8 @@ mod tests {
     ) -> (GbmPathPlan, LogDiscountCurve) {
         let grid = TimeGrid::try_new(times).unwrap();
         let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(&grid, vec![0.0; grid.len()]).unwrap();
         let dividends = dividend
             .map(|(node, amount)| {
                 vec![CashDividend::try_new(grid.node_id(node).unwrap(), amount).unwrap()]
@@ -857,6 +860,7 @@ mod tests {
         let plan = GbmPathPlan::try_new(
             &schedule,
             &curve,
+            &dividend_yield_curve,
             ConstantVolatility::try_new(0.30).unwrap(),
             DividendPolicy::Liquidator,
         )
@@ -939,9 +943,12 @@ mod tests {
         let grid = simulation_curve.grid().clone();
         let expiry = grid.node_id(1).unwrap();
         let schedule = EventSchedule::try_new(grid, [], [], expiry).unwrap();
+        let dividend_yield_curve =
+            CumulativeDividendYieldCurve::try_new(simulation_curve.grid(), [0.0, 0.0]).unwrap();
         let other_volatility_plan = GbmPathPlan::try_new(
             &schedule,
             &simulation_curve,
+            &dividend_yield_curve,
             ConstantVolatility::try_new(0.20).unwrap(),
             DividendPolicy::Liquidator,
         )

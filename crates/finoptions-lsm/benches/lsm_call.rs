@@ -2,7 +2,8 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use finoptions_core::{
-    CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, LogDiscountCurve, TimeGrid,
+    CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
+    LogDiscountCurve, TimeGrid,
 };
 use finoptions_lsm::{
     ExerciseTieRule, LsmCallEstimator, PolynomialDegree, PolynomialRegressionSpec,
@@ -39,6 +40,8 @@ fn workload(
         })
         .collect::<Vec<_>>();
     let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+    let dividend_yield_curve =
+        CumulativeDividendYieldCurve::try_new(&grid, vec![0.0; grid.len()]).unwrap();
     let dividend = CashDividend::try_new(
         grid.node_id(usize::try_from(dividend_node).unwrap())
             .unwrap(),
@@ -54,6 +57,7 @@ fn workload(
     let plan = GbmPathPlan::try_new(
         &schedule,
         &curve,
+        &dividend_yield_curve,
         ConstantVolatility::try_new(0.30).unwrap(),
         DividendPolicy::Liquidator,
     )

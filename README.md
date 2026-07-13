@@ -4,9 +4,10 @@ Private pre-release repository for a high-performance, financially explicit opti
 engine. It presents one small typed Python package backed by safe, dependency-isolated Rust crates.
 
 The first supported slice is deliberately narrow: event-aligned deterministic cash dividends,
-node-aligned deterministic discount factors, constant-volatility risk-neutral GBM, explicit finite
-exercise schedules, and exact serial/parallel path dynamics from either explicit normal variates or
-path-addressable seeded streams, and independently fitted/evaluated LSM for fixed-strike calls. Its
+node-aligned deterministic discount factors and cumulative continuous proportional-dividend
+yields, constant-volatility risk-neutral GBM, explicit finite exercise schedules, and exact
+serial/parallel path dynamics from either explicit normal variates or path-addressable seeded
+streams, and independently fitted/evaluated LSM for fixed-strike calls. Its
 checked degree-zero-through-four polynomial regression kernel has passed the solver gate.
 Unsupported semantics fail; the engine never substitutes a nearby model, algorithm, precision,
 event time, random stream, or backend.
@@ -30,7 +31,12 @@ Financial schedules are immutable and explicit. Construction fails before pricin
 ambiguous, duplicated, reordered, off-grid, non-finite, or not canonically represented:
 
 ```python
-from finoptions import CashDividend, EventSchedule, LogDiscountCurve
+from finoptions import (
+    CashDividend,
+    CumulativeDividendYieldCurve,
+    EventSchedule,
+    LogDiscountCurve,
+)
 
 schedule = EventSchedule(
     times=(0.0, 0.5, 1.0),
@@ -42,6 +48,7 @@ curve = LogDiscountCurve(
     times=schedule.times,
     log_discounts=(0.0, -0.01, -0.025),
 )
+dividend_yield_curve = CumulativeDividendYieldCurve.zero(times=schedule.times)
 ```
 
 Exercise at a dividend node occurs in the pre-dividend state; expiry is a separate terminal node.
@@ -60,6 +67,7 @@ paths = simulate_gbm_seeded(
     initial_spot=100.0,
     schedule=schedule,
     curve=curve,
+    dividend_yield_curve=dividend_yield_curve,
     volatility=ConstantVolatility(0.20),
     dividend_policy=DividendPolicy.LIQUIDATOR,
     executor=CpuExecutor(threads=4),
@@ -120,6 +128,7 @@ result = price_lsm_call(
     strike=100.0,
     schedule=schedule,
     curve=curve,
+    dividend_yield_curve=dividend_yield_curve,
     volatility=ConstantVolatility(0.20),
     dividend_policy=DividendPolicy.LIQUIDATOR,
     executor=CpuExecutor(threads=4),

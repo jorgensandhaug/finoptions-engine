@@ -95,6 +95,61 @@ pub enum InputError {
         interval_log_discount: f64,
     },
 
+    /// Cumulative dividend-yield curve and time-grid node counts differ.
+    #[error("cumulative dividend-yield curve has {observed} nodes; time grid requires {expected}")]
+    DividendYieldCurveLengthMismatch {
+        /// Required node count.
+        expected: usize,
+        /// Supplied node count.
+        observed: usize,
+    },
+
+    /// The cumulative dividend-yield curve does not begin at the valuation origin.
+    #[error("cumulative dividend yield at node 0 must be exactly 0.0; observed {observed:?}")]
+    InvalidCumulativeDividendYieldOrigin {
+        /// Observed origin value.
+        observed: f64,
+    },
+
+    /// A cumulative continuous dividend yield is negative, noncanonical zero, NaN, or infinite.
+    #[error(
+        "cumulative dividend yield at node {node} must be finite and canonically nonnegative; observed {observed:?}"
+    )]
+    InvalidCumulativeDividendYield {
+        /// Zero-based node index.
+        node: usize,
+        /// Invalid cumulative yield value.
+        observed: f64,
+    },
+
+    /// An interval implies a negative continuous proportional dividend yield.
+    #[error(
+        "cumulative dividend yield must be nondecreasing; node {previous_node} is {previous:?} and node {node} is {observed:?}"
+    )]
+    DecreasingCumulativeDividendYield {
+        /// Previous zero-based node index.
+        previous_node: usize,
+        /// Previous cumulative yield.
+        previous: f64,
+        /// Current zero-based node index.
+        node: usize,
+        /// Current cumulative yield.
+        observed: f64,
+    },
+
+    /// An interval's proportional payout discount cannot be represented.
+    #[error(
+        "continuous dividend-yield factor from node {from_node} to {to_node} is not finite and positive; integrated interval yield is {interval_yield:?}"
+    )]
+    UnrepresentableIntervalDividendYield {
+        /// Start node.
+        from_node: usize,
+        /// End node.
+        to_node: usize,
+        /// `integral_from^to q(u) du`.
+        interval_yield: f64,
+    },
+
     /// A cash dividend amount is negative, NaN, or infinite.
     #[error("cash dividend at node {node} must be finite and nonnegative; observed {observed:?}")]
     InvalidCashDividend {
