@@ -5,6 +5,8 @@ authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+license-file.workspace = true
+description = "Event-aligned simulation primitives for finoptions-engine"
 publish = false
 
 [dependencies]
@@ -12,4 +14,3 @@ finoptions-core.workspace = true
 
 [lints]
 workspace = true
-

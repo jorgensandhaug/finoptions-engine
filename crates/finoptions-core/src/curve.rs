@@ -1,11 +1,11 @@
 //! Node-aligned deterministic discount factors.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{InputError, NodeId, TimeGrid};
 
 /// Immutable `log(P(0,t))` values aligned one-for-one with a [`TimeGrid`].
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LogDiscountCurve {
     log_discounts: Box<[f64]>,
 }
@@ -31,7 +31,7 @@ impl LogDiscountCurve {
                 observed: log_discounts.len(),
             });
         }
-        if log_discounts[0] != 0.0 {
+        if log_discounts[0].to_bits() != 0.0_f64.to_bits() {
             return Err(InputError::InvalidDiscountOrigin {
                 observed: log_discounts[0],
             });
@@ -111,6 +111,10 @@ mod tests {
         assert!(matches!(
             LogDiscountCurve::try_new(&grid, [0.0, f64::INFINITY]),
             Err(InputError::NonFiniteLogDiscount { node: 1, .. })
+        ));
+        assert!(matches!(
+            LogDiscountCurve::try_new(&grid, [-0.0, -0.01]),
+            Err(InputError::InvalidDiscountOrigin { observed }) if observed.is_sign_negative()
         ));
     }
 }

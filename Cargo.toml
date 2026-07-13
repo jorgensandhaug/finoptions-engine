@@ -14,6 +14,7 @@ authors = ["Jørgen Sandhaug"]
 edition = "2024"
 rust-version = "1.97"
 repository = "https://github.com/jorgensandhaug/finoptions-engine"
+license-file = "LICENSE"
 
 [workspace.dependencies]
 finoptions-core = { path = "crates/finoptions-core", version = "0.1.0" }
@@ -45,4 +46,3 @@ debug = "line-tables-only"
 
 [profile.bench]
 inherits = "release"
-

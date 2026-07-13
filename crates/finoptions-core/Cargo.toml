@@ -5,6 +5,8 @@ authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+license-file.workspace = true
+description = "Validated financial types and event semantics for finoptions-engine"
 publish = false
 
 [dependencies]
@@ -13,4 +15,3 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
-

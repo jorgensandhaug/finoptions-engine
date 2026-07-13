@@ -17,7 +17,7 @@ pub enum DividendPolicy {
 }
 
 /// A nonnegative deterministic cash amount attached to an exact event node.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct CashDividend {
     node: NodeId,
     amount: f64,
@@ -30,7 +30,7 @@ impl CashDividend {
     ///
     /// Returns [`InputError::InvalidCashDividend`] when `amount` is negative or non-finite.
     pub fn try_new(node: NodeId, amount: f64) -> Result<Self, InputError> {
-        if !amount.is_finite() || amount < 0.0 {
+        if !amount.is_finite() || amount < 0.0 || (amount == 0.0 && amount.is_sign_negative()) {
             return Err(InputError::InvalidCashDividend {
                 node: node.get(),
                 observed: amount,
@@ -57,7 +57,10 @@ impl CashDividend {
     ///
     /// Returns [`InputError::InvalidSpotBeforeEvent`] when `spot_before` is negative or non-finite.
     pub fn apply(self, policy: DividendPolicy, spot_before: f64) -> Result<f64, InputError> {
-        if !spot_before.is_finite() || spot_before < 0.0 {
+        if !spot_before.is_finite()
+            || spot_before < 0.0
+            || (spot_before == 0.0 && spot_before.is_sign_negative())
+        {
             return Err(InputError::InvalidSpotBeforeEvent {
                 node: self.node.get(),
                 observed: spot_before,
@@ -127,6 +130,10 @@ mod tests {
         assert!(matches!(
             CashDividend::try_new(node, -f64::EPSILON),
             Err(InputError::InvalidCashDividend { .. })
+        ));
+        assert!(matches!(
+            CashDividend::try_new(node, -0.0),
+            Err(InputError::InvalidCashDividend { observed, .. }) if observed.is_sign_negative()
         ));
     }
 }

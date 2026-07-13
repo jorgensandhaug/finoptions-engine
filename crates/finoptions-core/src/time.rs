@@ -1,11 +1,11 @@
 //! Exact node identity and strictly ordered model time.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::InputError;
 
 /// Stable zero-based identity of a node in a validated time grid.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[repr(transparent)]
 pub struct NodeId(u32);
 
@@ -25,7 +25,7 @@ impl NodeId {
 }
 
 /// Immutable model times beginning at the exact valuation origin.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TimeGrid {
     times: Box<[f64]>,
 }
@@ -48,7 +48,7 @@ impl TimeGrid {
                 observed: origin,
             });
         }
-        if origin != 0.0 {
+        if origin.to_bits() != 0.0_f64.to_bits() {
             return Err(InputError::InvalidTimeOrigin { observed: origin });
         }
         NodeId::from_index(times.len() - 1)?;
@@ -145,6 +145,10 @@ mod tests {
                 observed: f64::EPSILON,
             }
         );
+        assert!(matches!(
+            TimeGrid::try_new([-0.0, 1.0]),
+            Err(InputError::InvalidTimeOrigin { observed }) if observed.is_sign_negative()
+        ));
     }
 
     #[test]

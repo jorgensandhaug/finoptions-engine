@@ -114,4 +114,67 @@ pub enum InputError {
         /// Invalid stock state.
         observed: f64,
     },
+
+    /// The terminal expiry node is absent, is time zero, or is not the final node.
+    #[error("expiry must be the final non-origin node {expected}; observed node {observed}")]
+    InvalidExpiryNode {
+        /// Required final node ID.
+        expected: u32,
+        /// Supplied expiry node ID.
+        observed: u32,
+    },
+
+    /// More than one cash dividend was attached to the same event node.
+    #[error("cash-dividend schedule repeats node {node}")]
+    DuplicateDividendNode {
+        /// Repeated node ID.
+        node: u32,
+    },
+
+    /// Cash-dividend nodes are not supplied in strictly increasing order.
+    #[error(
+        "cash-dividend nodes must be strictly increasing; observed node {node} after {previous}"
+    )]
+    UnorderedDividendNode {
+        /// Previous node ID.
+        previous: u32,
+        /// Current out-of-order node ID.
+        node: u32,
+    },
+
+    /// A cash dividend is attached at valuation or at/after expiry.
+    #[error(
+        "cash dividend at node {node} must occur strictly after valuation and before expiry node {expiry}"
+    )]
+    InvalidDividendNode {
+        /// Invalid dividend node.
+        node: u32,
+        /// Terminal expiry node.
+        expiry: u32,
+    },
+
+    /// More than one exercise opportunity was attached to the same event node.
+    #[error("exercise schedule repeats node {node}")]
+    DuplicateExerciseNode {
+        /// Repeated node ID.
+        node: u32,
+    },
+
+    /// Exercise nodes are not supplied in strictly increasing order.
+    #[error("exercise nodes must be strictly increasing; observed node {node} after {previous}")]
+    UnorderedExerciseNode {
+        /// Previous node ID.
+        previous: u32,
+        /// Current out-of-order node ID.
+        node: u32,
+    },
+
+    /// An exercise decision is attached at/after terminal expiry.
+    #[error("exercise opportunity at node {node} must occur before expiry node {expiry}")]
+    InvalidExerciseNode {
+        /// Invalid exercise node.
+        node: u32,
+        /// Terminal expiry node.
+        expiry: u32,
+    },
 }
