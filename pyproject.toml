@@ -30,6 +30,8 @@ manifest-path = "crates/finoptions-python/Cargo.toml"
 python-source = "python"
 module-name = "finoptions._native"
 features = ["extension-module"]
+locked = true
+include = [{ path = "rust-toolchain.toml", format = "sdist" }]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]
