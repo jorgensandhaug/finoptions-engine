@@ -11,7 +11,15 @@ publish = false
 
 [dependencies]
 finoptions-core.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "gbm_paths"
+harness = false
 
 [lints]
 workspace = true

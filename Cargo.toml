@@ -17,11 +17,14 @@ repository = "https://github.com/jorgensandhaug/finoptions-engine"
 license-file = "LICENSE"
 
 [workspace.dependencies]
+criterion = { version = "0.8.2", default-features = false }
 finoptions-core = { path = "crates/finoptions-core", version = "0.1.0" }
 finoptions-lsm = { path = "crates/finoptions-lsm", version = "0.1.0" }
 finoptions-sim = { path = "crates/finoptions-sim", version = "0.1.0" }
+ndarray = "0.17.2"
 numpy = "0.29.0"
 pyo3 = "0.29.0"
+rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"

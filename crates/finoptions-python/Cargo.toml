@@ -21,6 +21,7 @@ extension-module = ["pyo3/extension-module"]
 finoptions-core.workspace = true
 finoptions-lsm.workspace = true
 finoptions-sim.workspace = true
+ndarray.workspace = true
 numpy.workspace = true
 pyo3.workspace = true
 

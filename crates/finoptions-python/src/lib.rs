@@ -1,14 +1,41 @@
 //! Private Python extension. The stable public surface lives in `python/finoptions`.
 
 use finoptions_core::{
-    CashDividend, ConstantVolatility, EventSchedule, InputError as CoreInputError,
+    CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, InputError as CoreInputError,
     LogDiscountCurve, TimeGrid,
 };
+use finoptions_sim::{
+    CpuExecutor as CoreCpuExecutor, GbmPathPlan, SimulationError as CoreSimulationError,
+};
+use ndarray::Array2;
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::create_exception;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 create_exception!(_native, InputError, PyValueError);
+create_exception!(_native, SimulationError, PyRuntimeError);
+
+/// Dedicated native CPU worker pool owned by the public Python execution specification.
+#[pyclass(name = "CpuExecutor", frozen, module = "finoptions._native")]
+struct NativeCpuExecutor {
+    inner: CoreCpuExecutor,
+}
+
+#[pymethods]
+impl NativeCpuExecutor {
+    #[new]
+    fn new(threads: usize) -> PyResult<Self> {
+        CoreCpuExecutor::try_new(threads)
+            .map(|inner| Self { inner })
+            .map_err(CoreSimulationError::into_py_simulation_error)
+    }
+
+    #[getter]
+    fn threads(&self) -> usize {
+        self.inner.threads()
+    }
+}
 
 trait IntoPyInputError {
     fn into_py_input_error(self) -> PyErr;
@@ -17,6 +44,23 @@ trait IntoPyInputError {
 impl IntoPyInputError for CoreInputError {
     fn into_py_input_error(self) -> PyErr {
         InputError::new_err(self.to_string())
+    }
+}
+
+trait IntoPySimulationError {
+    fn into_py_simulation_error(self) -> PyErr;
+}
+
+impl IntoPySimulationError for CoreSimulationError {
+    fn into_py_simulation_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreSimulationError::NonFiniteTransition { .. }
+            | CoreSimulationError::NonFinitePathTransition { .. } => {
+                SimulationError::new_err(message)
+            }
+            _ => InputError::new_err(message),
+        }
     }
 }
 
@@ -55,14 +99,31 @@ fn validate_event_schedule(
     exercise_nodes: Vec<u32>,
     expiry_node: u32,
 ) -> PyResult<()> {
+    parse_event_schedule(
+        times,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+    )
+    .map(|_| ())
+    .map_err(CoreInputError::into_py_input_error)
+}
+
+fn parse_event_schedule(
+    times: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+) -> Result<EventSchedule, CoreInputError> {
     if dividend_nodes.len() != dividend_amounts.len() {
         return Err(CoreInputError::DividendColumnLengthMismatch {
             nodes: dividend_nodes.len(),
             amounts: dividend_amounts.len(),
-        }
-        .into_py_input_error());
+        });
     }
-    let grid = TimeGrid::try_new(times).map_err(CoreInputError::into_py_input_error)?;
+    let grid = TimeGrid::try_new(times)?;
     let dividends = dividend_nodes
         .into_iter()
         .zip(dividend_amounts)
@@ -70,19 +131,13 @@ fn validate_event_schedule(
             let node = grid.node_id(node as usize)?;
             CashDividend::try_new(node, amount)
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CoreInputError::into_py_input_error)?;
+        .collect::<Result<Vec<_>, _>>()?;
     let exercise_nodes = exercise_nodes
         .into_iter()
         .map(|node| grid.node_id(node as usize))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(CoreInputError::into_py_input_error)?;
-    let expiry = grid
-        .node_id(expiry_node as usize)
-        .map_err(CoreInputError::into_py_input_error)?;
+        .collect::<Result<Vec<_>, _>>()?;
+    let expiry = grid.node_id(expiry_node as usize)?;
     EventSchedule::try_new(grid, dividends, exercise_nodes, expiry)
-        .map(|_| ())
-        .map_err(CoreInputError::into_py_input_error)
 }
 
 /// Validates node-aligned log discount factors.
@@ -94,11 +149,78 @@ fn validate_log_discount_curve(times: Vec<f64>, log_discounts: Vec<f64>) -> PyRe
         .map_err(CoreInputError::into_py_input_error)
 }
 
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn simulate_gbm_f64<'py>(
+    py: Python<'py>,
+    initial_spot: f64,
+    schedule_times: Vec<f64>,
+    curve_times: Vec<f64>,
+    log_discounts: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+    annualized_volatility: f64,
+    dividend_policy: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    normals: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let schedule = parse_event_schedule(
+        schedule_times,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+    )
+    .map_err(CoreInputError::into_py_input_error)?;
+    let curve_grid = TimeGrid::try_new(curve_times).map_err(CoreInputError::into_py_input_error)?;
+    let curve = LogDiscountCurve::try_new(&curve_grid, log_discounts)
+        .map_err(CoreInputError::into_py_input_error)?;
+    let volatility = ConstantVolatility::try_new(annualized_volatility)
+        .map_err(CoreInputError::into_py_input_error)?;
+    let policy = match dividend_policy {
+        "liquidator" => DividendPolicy::Liquidator,
+        "survivor" => DividendPolicy::Survivor,
+        observed => {
+            return Err(InputError::new_err(format!(
+                "unsupported dividend policy {observed:?}"
+            )));
+        }
+    };
+    let plan = GbmPathPlan::try_new(&schedule, &curve, volatility, policy)
+        .map_err(CoreSimulationError::into_py_simulation_error)?;
+
+    let shape = normals.shape();
+    if shape[0] != plan.intervals() {
+        return Err(CoreSimulationError::BufferLengthMismatch {
+            buffer: "normal interval-row",
+            expected: plan.intervals(),
+            observed: shape[0],
+        }
+        .into_py_simulation_error());
+    }
+    let paths = shape[1];
+    let normal_values = normals.as_slice()?;
+    let core_executor = &executor.inner;
+    let simulated = py
+        .detach(move || core_executor.simulate_gbm(&plan, initial_spot, paths, normal_values))
+        .map_err(CoreSimulationError::into_py_simulation_error)?;
+    let rows = simulated.observation_nodes().len();
+    let values = simulated.into_values();
+    let array = Array2::from_shape_vec((rows, paths), values)
+        .map_err(|error| SimulationError::new_err(error.to_string()))?;
+    Ok(array.into_pyarray(py))
+}
+
 /// Private native module.
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<NativeCpuExecutor>()?;
     module.add("InputError", module.py().get_type::<InputError>())?;
+    module.add("SimulationError", module.py().get_type::<SimulationError>())?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
+    module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;
     module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event_schedule, module)?)?;
