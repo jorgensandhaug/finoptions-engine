@@ -18,6 +18,28 @@ just test
 just check
 ```
 
+## Validated specifications
+
+Financial schedules are immutable and explicit. Construction fails before pricing if an event is
+ambiguous, duplicated, reordered, off-grid, non-finite, or not canonically represented:
+
+```python
+from finoptions import CashDividend, EventSchedule, LogDiscountCurve
+
+schedule = EventSchedule(
+    times=(0.0, 0.5, 1.0),
+    dividends=(CashDividend(node=1, amount=2.0),),
+    exercise_nodes=(1,),
+    expiry_node=2,
+)
+curve = LogDiscountCurve(
+    times=schedule.times,
+    log_discounts=(0.0, -0.01, -0.025),
+)
+```
+
+Exercise at a dividend node occurs in the pre-dividend state; expiry is a separate terminal node.
+No pricing method is exported until its complete estimator and independent validation gate pass.
+
 The repository is private, not yet licensed for redistribution, and no package publication is
 authorized.
-

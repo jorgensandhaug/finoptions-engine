@@ -177,4 +177,13 @@ pub enum InputError {
         /// Terminal expiry node.
         expiry: u32,
     },
+
+    /// Parallel schedule columns have different lengths.
+    #[error("event schedule has {nodes} dividend nodes but {amounts} dividend amounts")]
+    DividendColumnLengthMismatch {
+        /// Number of dividend node IDs.
+        nodes: usize,
+        /// Number of dividend cash amounts.
+        amounts: usize,
+    },
 }
