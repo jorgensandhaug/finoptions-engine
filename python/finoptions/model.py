@@ -64,6 +64,23 @@ class CashDividend:
 
 
 @dataclass(frozen=True, slots=True)
+class ConstantVolatility:
+    """Strictly positive finite annualized decimal volatility."""
+
+    annualized_decimal: float
+
+    def __post_init__(self) -> None:
+        """Reject inference, non-finite values, and the unsupported deterministic limit."""
+        if type(self.annualized_decimal) is not float:
+            msg = (
+                "constant annualized volatility must be a plain decimal float; "
+                f"observed {type(self.annualized_decimal).__name__}"
+            )
+            raise InputError(msg)
+        _native.validate_constant_volatility(self.annualized_decimal)
+
+
+@dataclass(frozen=True, slots=True)
 class EventSchedule:
     """Finite event grid with pre-dividend exercise and separate terminal expiry."""
 

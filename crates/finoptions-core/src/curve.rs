@@ -7,6 +7,7 @@ use crate::{InputError, NodeId, TimeGrid};
 /// Immutable `log(P(0,t))` values aligned one-for-one with a [`TimeGrid`].
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LogDiscountCurve {
+    grid: TimeGrid,
     log_discounts: Box<[f64]>,
 }
 
@@ -53,7 +54,16 @@ impl LogDiscountCurve {
                 });
             }
         }
-        Ok(Self { log_discounts })
+        Ok(Self {
+            grid: grid.clone(),
+            log_discounts,
+        })
+    }
+
+    /// Borrows the exact time grid against which the curve was validated.
+    #[must_use]
+    pub const fn grid(&self) -> &TimeGrid {
+        &self.grid
     }
 
     /// Borrows all `log(P(0,t))` values.

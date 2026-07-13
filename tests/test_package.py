@@ -62,3 +62,14 @@ def test_curve_supports_negative_rates_but_rejects_bad_origin() -> None:
     assert curve.log_discounts[-1] == expected_final_log_discount
     with pytest.raises(finoptions.InputError, match=r"exactly 0\.0"):
         finoptions.LogDiscountCurve(times=(0.0, 1.0), log_discounts=(-0.0, -0.01))
+
+
+def test_volatility_is_explicitly_an_annualized_decimal() -> None:
+    """The facade never guesses percentages and rejects the unsupported deterministic limit."""
+    expected = 0.20
+    sigma = finoptions.ConstantVolatility(annualized_decimal=expected)
+    assert sigma.annualized_decimal == expected
+    with pytest.raises(finoptions.InputError, match="strictly positive"):
+        finoptions.ConstantVolatility(annualized_decimal=0.0)
+    with pytest.raises(finoptions.InputError, match="plain decimal float"):
+        finoptions.ConstantVolatility(annualized_decimal=20)  # type is checked deliberately

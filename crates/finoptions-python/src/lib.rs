@@ -1,7 +1,8 @@
 //! Private Python extension. The stable public surface lives in `python/finoptions`.
 
 use finoptions_core::{
-    CashDividend, EventSchedule, InputError as CoreInputError, LogDiscountCurve, TimeGrid,
+    CashDividend, ConstantVolatility, EventSchedule, InputError as CoreInputError,
+    LogDiscountCurve, TimeGrid,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
@@ -33,6 +34,14 @@ fn validate_cash_dividend_amount(amount: f64) -> PyResult<()> {
         .node_id(1)
         .map_err(CoreInputError::into_py_input_error)?;
     CashDividend::try_new(synthetic_node, amount)
+        .map(|_| ())
+        .map_err(CoreInputError::into_py_input_error)
+}
+
+/// Validates annualized decimal constant volatility.
+#[pyfunction]
+fn validate_constant_volatility(annualized_decimal: f64) -> PyResult<()> {
+    ConstantVolatility::try_new(annualized_decimal)
         .map(|_| ())
         .map_err(CoreInputError::into_py_input_error)
 }
@@ -91,6 +100,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("InputError", module.py().get_type::<InputError>())?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event_schedule, module)?)?;
     module.add_function(wrap_pyfunction!(validate_log_discount_curve, module)?)?;
     Ok(())

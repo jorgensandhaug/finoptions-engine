@@ -186,4 +186,13 @@ pub enum InputError {
         /// Number of dividend cash amounts.
         amounts: usize,
     },
+
+    /// Annualized volatility is zero, negative, NaN, or infinite.
+    #[error(
+        "constant annualized volatility must be finite and strictly positive; observed {observed:?}"
+    )]
+    InvalidConstantVolatility {
+        /// Invalid annualized decimal volatility.
+        observed: f64,
+    },
 }

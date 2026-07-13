@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import Final, NamedTuple
 
 from . import _native
-from .model import CashDividend, DividendPolicy, EventSchedule, InputError, LogDiscountCurve
+from .model import (
+    CashDividend,
+    ConstantVolatility,
+    DividendPolicy,
+    EventSchedule,
+    InputError,
+    LogDiscountCurve,
+)
 
 
 class BuildInfo(NamedTuple):
@@ -24,6 +31,7 @@ __version__: Final = build_info().package_version
 __all__ = [
     "BuildInfo",
     "CashDividend",
+    "ConstantVolatility",
     "DividendPolicy",
     "EventSchedule",
     "InputError",
