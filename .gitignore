@@ -1,0 +1,27 @@
+/.venv/
+/.cache/
+/.mypy_cache/
+/.pytest_cache/
+/.ruff_cache/
+/target/
+**/__pycache__/
+*.so
+*.dylib
+*.dll
+*.py[cod]
+*.profraw
+*.profdata
+.DS_Store
+
+# Build/package outputs
+/dist/
+/wheelhouse/
+
+# Benchmark outputs are generated from immutable manifests, not committed ad hoc.
+/benchmark-results/
+
+# Never commit local secrets.
+.env
+.env.*
+!.env.example
+

@@ -1,0 +1,27 @@
+[package]
+name = "finoptions-python"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+finoptions-core.workspace = true
+finoptions-lsm.workspace = true
+finoptions-sim.workspace = true
+numpy.workspace = true
+pyo3.workspace = true
+
+[lints]
+workspace = true
+

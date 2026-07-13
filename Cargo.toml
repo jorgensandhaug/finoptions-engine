@@ -1,0 +1,48 @@
+[workspace]
+members = [
+  "crates/finoptions-core",
+  "crates/finoptions-lsm",
+  "crates/finoptions-python",
+  "crates/finoptions-sim",
+  "crates/finoptions-testkit",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Jørgen Sandhaug"]
+edition = "2024"
+rust-version = "1.97"
+repository = "https://github.com/jorgensandhaug/finoptions-engine"
+
+[workspace.dependencies]
+finoptions-core = { path = "crates/finoptions-core", version = "0.1.0" }
+finoptions-lsm = { path = "crates/finoptions-lsm", version = "0.1.0" }
+finoptions-sim = { path = "crates/finoptions-sim", version = "0.1.0" }
+numpy = "0.29.0"
+pyo3 = "0.29.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+debug = "line-tables-only"
+incremental = true
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"
+

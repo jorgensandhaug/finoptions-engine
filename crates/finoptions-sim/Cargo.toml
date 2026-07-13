@@ -1,0 +1,15 @@
+[package]
+name = "finoptions-sim"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+finoptions-core.workspace = true
+
+[lints]
+workspace = true
+

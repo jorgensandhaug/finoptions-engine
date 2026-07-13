@@ -1,0 +1,16 @@
+[package]
+name = "finoptions-lsm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+finoptions-core.workspace = true
+finoptions-sim.workspace = true
+
+[lints]
+workspace = true
+

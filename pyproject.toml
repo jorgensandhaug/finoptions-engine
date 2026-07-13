@@ -1,0 +1,71 @@
+[build-system]
+requires = ["maturin>=1.14.1,<2"]
+build-backend = "maturin"
+
+[project]
+name = "finoptions-engine"
+version = "0.1.0"
+description = "High-performance, financially explicit options research engine"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Jørgen Sandhaug" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Typing :: Typed",
+]
+dependencies = ["numpy>=2.5.1,<3"]
+
+[dependency-groups]
+dev = [
+  "maturin==1.14.1",
+  "mypy==2.2.0",
+  "pytest==9.1.1",
+  "ruff==0.15.21",
+]
+
+[tool.maturin]
+manifest-path = "crates/finoptions-python/Cargo.toml"
+python-source = "python"
+module-name = "finoptions._native"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+packages = ["finoptions"]
+mypy_path = "python"
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812", # formatter owns trailing commas
+  "D203",   # incompatible with D211
+  "D213",   # incompatible with D212
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "Cargo.lock" },
+  { file = "crates/**/Cargo.toml" },
+  { file = "crates/**/*.rs" },
+  { file = "python/**/*.py" },
+  { file = "python/**/*.pyi" },
+]
