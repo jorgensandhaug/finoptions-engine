@@ -1,5 +1,12 @@
 //! Private Python extension. The stable public surface lives in `python/finoptions`.
 
+use finoptions_batch::{
+    BatchError as CoreBatchError, CashAmountScale as CoreCashAmountScale,
+    DividendBinSpec as CoreDividendBinSpec, MaturityBoundary as CoreMaturityBoundary,
+    PaddedSequenceSpec as CorePaddedSequenceSpec, RaggedCashDividends,
+    TimeBinClosure as CoreTimeBinClosure, bin_dividends_f32 as core_bin_dividends_f32,
+    pack_padded_dividends_f32 as core_pack_padded_dividends_f32,
+};
 use finoptions_core::{
     CashDividend, ConstantVolatility, DividendPolicy, EventSchedule, InputError as CoreInputError,
     LogDiscountCurve, TimeGrid,
@@ -10,17 +17,22 @@ use finoptions_lsm::{
     PolynomialDegree as CorePolynomialDegree,
     PolynomialRegressionSpec as CorePolynomialRegressionSpec,
 };
+use finoptions_runtime::{CpuExecutor as CoreCpuExecutor, ExecutionError as CoreExecutionError};
 use finoptions_sim::{
-    CpuExecutor as CoreCpuExecutor, GbmPathPlan, RandomStream as CoreRandomStream, SimulatedPaths,
+    GbmPathPlan, RandomStream as CoreRandomStream, SimulatedPaths,
     SimulationError as CoreSimulationError,
 };
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 create_exception!(_native, InputError, PyValueError);
+create_exception!(_native, BatchError, PyValueError);
+create_exception!(_native, ExecutionError, PyRuntimeError);
 create_exception!(_native, SimulationError, PyRuntimeError);
 create_exception!(_native, LsmError, PyRuntimeError);
 
@@ -36,12 +48,36 @@ impl NativeCpuExecutor {
     fn new(threads: usize) -> PyResult<Self> {
         CoreCpuExecutor::try_new(threads)
             .map(|inner| Self { inner })
-            .map_err(CoreSimulationError::into_py_simulation_error)
+            .map_err(CoreExecutionError::into_py_execution_error)
     }
 
     #[getter]
     fn threads(&self) -> usize {
         self.inner.threads()
+    }
+}
+
+trait IntoPyExecutionError {
+    fn into_py_execution_error(self) -> PyErr;
+}
+
+impl IntoPyExecutionError for CoreExecutionError {
+    fn into_py_execution_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreExecutionError::EmptyThreadPool => InputError::new_err(message),
+            _ => ExecutionError::new_err(message),
+        }
+    }
+}
+
+trait IntoPyBatchError {
+    fn into_py_batch_error(self) -> PyErr;
+}
+
+impl IntoPyBatchError for CoreBatchError {
+    fn into_py_batch_error(self) -> PyErr {
+        BatchError::new_err(self.to_string())
     }
 }
 
@@ -129,6 +165,166 @@ fn validate_event_schedule(
     )
     .map(|_| ())
     .map_err(CoreInputError::into_py_input_error)
+}
+
+/// Validates exact Arrow-style ragged cash-dividend buffers without copying them.
+#[allow(clippy::needless_pass_by_value)]
+#[pyfunction]
+fn validate_ragged_cash_dividends_f64(
+    offsets: PyReadonlyArray1<'_, i64>,
+    times: PyReadonlyArray1<'_, f64>,
+    amounts: PyReadonlyArray1<'_, f64>,
+) -> PyResult<()> {
+    let offsets = offsets.as_slice()?;
+    let times = times.as_slice()?;
+    let amounts = amounts.as_slice()?;
+    RaggedCashDividends::try_new(offsets, times, amounts)
+        .map(|_| ())
+        .map_err(CoreBatchError::into_py_batch_error)
+}
+
+fn parse_maturity_boundary(value: &str) -> PyResult<CoreMaturityBoundary> {
+    match value {
+        "strictly_before" => Ok(CoreMaturityBoundary::StrictlyBefore),
+        "at_or_before" => Ok(CoreMaturityBoundary::AtOrBefore),
+        _ => Err(BatchError::new_err(format!(
+            "unsupported maturity boundary {value:?}"
+        ))),
+    }
+}
+
+fn parse_time_bin_closure(value: &str) -> PyResult<CoreTimeBinClosure> {
+    match value {
+        "left_closed_right_open" => Ok(CoreTimeBinClosure::LeftClosedRightOpen),
+        "left_open_right_closed" => Ok(CoreTimeBinClosure::LeftOpenRightClosed),
+        _ => Err(BatchError::new_err(format!(
+            "unsupported time-bin closure {value:?}"
+        ))),
+    }
+}
+
+fn parse_cash_amount_scale<'a>(
+    value: &str,
+    spots: Option<&'a [f64]>,
+) -> PyResult<CoreCashAmountScale<'a>> {
+    match (value, spots) {
+        ("absolute", None) => Ok(CoreCashAmountScale::Absolute),
+        ("divide_by_spot", Some(values)) => Ok(CoreCashAmountScale::DivideBySpot(values)),
+        ("absolute", Some(_)) => Err(BatchError::new_err(
+            "absolute cash-amount scale requires spots=None",
+        )),
+        ("divide_by_spot", None) => Err(BatchError::new_err(
+            "divide_by_spot cash-amount scale requires a float64 spot vector",
+        )),
+        _ => Err(BatchError::new_err(format!(
+            "unsupported cash-amount scale {value:?}"
+        ))),
+    }
+}
+
+type NativePaddedDividendArrays<'py> = (
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray2<bool>>,
+    Bound<'py, PyArray1<u32>>,
+);
+
+/// Derives chronological right-padded float32 cash-dividend tensors.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn pack_padded_dividends_f32<'py>(
+    py: Python<'py>,
+    offsets: PyReadonlyArray1<'py, i64>,
+    times: PyReadonlyArray1<'py, f64>,
+    amounts: PyReadonlyArray1<'py, f64>,
+    maturities: PyReadonlyArray1<'py, f64>,
+    amount_scale: &str,
+    capacity: usize,
+    maturity_boundary: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    spots: Option<PyReadonlyArray1<'py, f64>>,
+) -> PyResult<NativePaddedDividendArrays<'py>> {
+    let offsets = offsets.as_slice()?;
+    let times = times.as_slice()?;
+    let amounts = amounts.as_slice()?;
+    let maturities = maturities.as_slice()?;
+    let spot_values = spots.as_ref().map(PyReadonlyArray1::as_slice).transpose()?;
+    let scale = parse_cash_amount_scale(amount_scale, spot_values)?;
+    let spec =
+        CorePaddedSequenceSpec::try_new(capacity, parse_maturity_boundary(maturity_boundary)?)
+            .map_err(CoreBatchError::into_py_batch_error)?;
+    let core_executor = &executor.inner;
+    let output = py
+        .detach(move || {
+            let schedules =
+                RaggedCashDividends::try_new_with_executor(offsets, times, amounts, core_executor)?;
+            core_pack_padded_dividends_f32(schedules, maturities, scale, spec, core_executor)
+        })
+        .map_err(CoreBatchError::into_py_batch_error)?;
+    let rows = output.rows();
+    let width = output.capacity();
+    let (times, amounts, mask, lengths) = output.into_parts();
+    let times = Array2::from_shape_vec((rows, width), times).map_err(|error| {
+        PyRuntimeError::new_err(format!("internal time shape failure: {error}"))
+    })?;
+    let amounts = Array2::from_shape_vec((rows, width), amounts).map_err(|error| {
+        PyRuntimeError::new_err(format!("internal amount shape failure: {error}"))
+    })?;
+    let mask = Array2::from_shape_vec((rows, width), mask).map_err(|error| {
+        PyRuntimeError::new_err(format!("internal mask shape failure: {error}"))
+    })?;
+    Ok((
+        times.into_pyarray(py),
+        amounts.into_pyarray(py),
+        mask.into_pyarray(py),
+        lengths.into_pyarray(py),
+    ))
+}
+
+/// Derives chronological fixed-width float32 cash-dividend amount bins.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn bin_dividends_f32<'py>(
+    py: Python<'py>,
+    offsets: PyReadonlyArray1<'py, i64>,
+    times: PyReadonlyArray1<'py, f64>,
+    amounts: PyReadonlyArray1<'py, f64>,
+    maturities: PyReadonlyArray1<'py, f64>,
+    amount_scale: &str,
+    bins: usize,
+    horizon: f64,
+    closure: &str,
+    maturity_boundary: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    spots: Option<PyReadonlyArray1<'py, f64>>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let offsets = offsets.as_slice()?;
+    let times = times.as_slice()?;
+    let amounts = amounts.as_slice()?;
+    let maturities = maturities.as_slice()?;
+    let spot_values = spots.as_ref().map(PyReadonlyArray1::as_slice).transpose()?;
+    let scale = parse_cash_amount_scale(amount_scale, spot_values)?;
+    let spec = CoreDividendBinSpec::try_new(
+        bins,
+        horizon,
+        parse_time_bin_closure(closure)?,
+        parse_maturity_boundary(maturity_boundary)?,
+    )
+    .map_err(CoreBatchError::into_py_batch_error)?;
+    let core_executor = &executor.inner;
+    let output = py
+        .detach(move || {
+            let schedules =
+                RaggedCashDividends::try_new_with_executor(offsets, times, amounts, core_executor)?;
+            core_bin_dividends_f32(schedules, maturities, scale, spec, core_executor)
+        })
+        .map_err(CoreBatchError::into_py_batch_error)?;
+    let rows = output.rows();
+    let bins = output.bins();
+    let amounts = Array2::from_shape_vec((rows, bins), output.into_amounts()).map_err(|error| {
+        PyRuntimeError::new_err(format!("internal binned-amount shape failure: {error}"))
+    })?;
+    Ok(amounts.into_pyarray(py))
 }
 
 fn parse_event_schedule(
@@ -289,7 +485,7 @@ fn simulate_gbm_f64<'py>(
     let normal_values = normals.as_slice()?;
     let core_executor = &executor.inner;
     let simulated = py
-        .detach(move || core_executor.simulate_gbm(&plan, initial_spot, paths, normal_values))
+        .detach(move || plan.simulate_with(core_executor, initial_spot, paths, normal_values))
         .map_err(CoreSimulationError::into_py_simulation_error)?;
     simulated_into_array(py, simulated)
 }
@@ -327,7 +523,7 @@ fn simulate_gbm_seeded_f64<'py>(
     let stream = CoreRandomStream::new(seed, domain);
     let core_executor = &executor.inner;
     let simulated = py
-        .detach(move || core_executor.simulate_gbm_seeded(&plan, initial_spot, paths, stream))
+        .detach(move || plan.simulate_seeded_with(core_executor, initial_spot, paths, stream))
         .map_err(CoreSimulationError::into_py_simulation_error)?;
     simulated_into_array(py, simulated)
 }
@@ -502,9 +698,13 @@ fn price_lsm_call_seeded_f64<'py>(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeCpuExecutor>()?;
     module.add("InputError", module.py().get_type::<InputError>())?;
+    module.add("BatchError", module.py().get_type::<BatchError>())?;
+    module.add("ExecutionError", module.py().get_type::<ExecutionError>())?;
     module.add("SimulationError", module.py().get_type::<SimulationError>())?;
     module.add("LsmError", module.py().get_type::<LsmError>())?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
+    module.add_function(wrap_pyfunction!(bin_dividends_f32, module)?)?;
+    module.add_function(wrap_pyfunction!(pack_padded_dividends_f32, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
@@ -512,5 +712,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event_schedule, module)?)?;
     module.add_function(wrap_pyfunction!(validate_log_discount_curve, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        validate_ragged_cash_dividends_f64,
+        module
+    )?)?;
     Ok(())
 }

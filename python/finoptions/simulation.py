@@ -19,6 +19,7 @@ from .model import (
 )
 
 Float64Matrix = npt.NDArray[np.float64]
+ExecutionError = _native.ExecutionError
 SimulationError = _native.SimulationError
 _MATRIX_DIMENSIONS: Final = 2
 _MAX_SEED: Final = (2**64) - 1
@@ -275,6 +276,7 @@ def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is ind
 
 __all__ = [
     "CpuExecutor",
+    "ExecutionError",
     "GbmPaths",
     "RandomStream",
     "SimulationError",

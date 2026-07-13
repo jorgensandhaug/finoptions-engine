@@ -7,7 +7,7 @@ mod random;
 mod step;
 
 pub use error::SimulationError;
-pub use executor::CpuExecutor;
+pub use finoptions_runtime::{CpuExecutor, ExecutionError};
 pub use path::{GbmPathPlan, SimulatedPaths};
 pub use random::RandomStream;
 pub use step::GbmStep;

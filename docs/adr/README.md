@@ -10,3 +10,5 @@ repository.
 - [ADR 0004: Explicit random streams](0004-explicit-random-streams.md)
 - [ADR 0005: Checked low-degree polynomial regression](0005-checked-low-degree-polynomial-regression.md)
 - [ADR 0006: Independently fitted and evaluated call LSM](0006-independent-policy-lsm.md)
+- [ADR 0007: Shared explicit CPU runtime](0007-shared-explicit-cpu-runtime.md)
+- [ADR 0008: Ragged cash-dividend model tensors](0008-ragged-cash-dividend-tensors.md)

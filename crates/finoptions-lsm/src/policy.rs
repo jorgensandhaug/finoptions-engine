@@ -246,13 +246,13 @@ impl LsmCallEstimator {
         if plan.curve() != curve {
             return Err(LsmError::SimulationCurveMismatch);
         }
-        let training = executor
-            .simulate_gbm_seeded(plan, initial_spot, training_paths, training_stream)
+        let training = plan
+            .simulate_seeded_with(executor, initial_spot, training_paths, training_stream)
             .map_err(|source| LsmError::TrainingSimulation { source })?;
         let policy = self.fit(&training, curve, initial_spot)?;
         drop(training);
-        let evaluation_paths = executor
-            .simulate_gbm_seeded(plan, initial_spot, evaluation_paths, evaluation_stream)
+        let evaluation_paths = plan
+            .simulate_seeded_with(executor, initial_spot, evaluation_paths, evaluation_stream)
             .map_err(|source| LsmError::EvaluationSimulation { source })?;
         let evaluation = policy.evaluate(&evaluation_paths)?;
         Ok(LsmRun { policy, evaluation })

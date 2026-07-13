@@ -63,8 +63,7 @@ fn benchmark_gbm_paths(criterion: &mut Criterion) {
                 BenchmarkId::new(format!("{threads}_threads"), paths),
                 |bencher| {
                     bencher.iter(|| {
-                        executor
-                            .simulate_gbm(&plan, black_box(100.0), paths, black_box(&normals))
+                        plan.simulate_with(&executor, black_box(100.0), paths, black_box(&normals))
                             .unwrap()
                     });
                 },
@@ -84,9 +83,13 @@ fn benchmark_gbm_paths(criterion: &mut Criterion) {
                 BenchmarkId::new(format!("{threads}_threads"), paths),
                 |bencher| {
                     bencher.iter(|| {
-                        executor
-                            .simulate_gbm_seeded(&plan, black_box(100.0), paths, black_box(stream))
-                            .unwrap()
+                        plan.simulate_seeded_with(
+                            &executor,
+                            black_box(100.0),
+                            paths,
+                            black_box(stream),
+                        )
+                        .unwrap()
                     });
                 },
             );

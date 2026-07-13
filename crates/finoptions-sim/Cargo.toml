@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 finoptions-core.workspace = true
+finoptions-runtime.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 

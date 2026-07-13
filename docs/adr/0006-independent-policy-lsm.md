@@ -6,10 +6,9 @@
 ## Context
 
 Least-squares Monte Carlo constructs a stopping policy from simulated paths. Valuing that policy on
-the same paths reuses training information and can bias the reported result. The recovered project
-implementation did this, as was common in exploratory research, but a publication-grade estimator
-needs a separately identified fitting population and evaluation population. It also needs explicit
-event ordering, discounting, exercise support, regression diagnostics, and sampling uncertainty.
+the same paths reuses training information and can bias the reported result. The supported estimator
+therefore needs separately identified fitting and evaluation populations, plus explicit event
+ordering, discounting, exercise support, regression diagnostics, and sampling uncertainty.
 
 ## Decision
 

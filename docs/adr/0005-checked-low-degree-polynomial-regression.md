@@ -5,11 +5,11 @@
 
 ## Context
 
-The recovered project estimator uses ordinary least squares on in-the-money paths with a
-fourth-degree continuation-value polynomial. Repeated regressions are on the hot path, often with
-only 500 observations, so a general dense solver pays substantial dispatch, allocation, and
-factorization overhead. Normal equations are not acceptable: they square the design condition and
-make a plausible result too easy to return from a numerically unsupported population.
+The first target estimator uses ordinary least squares on in-the-money paths with a fourth-degree
+continuation-value polynomial. Repeated regressions are on the hot path, often with only 500
+observations, so a general dense solver pays substantial dispatch, allocation, and factorization
+overhead. Normal equations are not acceptable: they square the design condition and make a
+plausible result too easy to return from a numerically unsupported population.
 
 Agreement with another implementation is not a definition of financial or numerical correctness.
 Independent pivoted-QR/SVD calculations are validation oracles for the declared polynomial

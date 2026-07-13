@@ -39,19 +39,6 @@ pub enum SimulationError {
         maximum: u32,
     },
 
-    /// A CPU executor requested no worker threads.
-    #[error("CPU executor thread count must be positive")]
-    EmptyThreadPool,
-
-    /// A dedicated CPU worker pool could not be created.
-    #[error("failed to build CPU executor with {threads} threads: {reason}")]
-    ThreadPoolBuild {
-        /// Explicit requested worker count.
-        threads: usize,
-        /// Stable upstream failure message.
-        reason: String,
-    },
-
     /// A deterministic diagnostic replay did not reproduce a parallel worker failure.
     #[error(
         "parallel seeded simulation reported path {path} as failed, but deterministic diagnostic replay succeeded"

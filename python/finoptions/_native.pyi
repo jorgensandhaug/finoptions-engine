@@ -2,6 +2,8 @@ import numpy as np
 import numpy.typing as npt
 
 class InputError(ValueError): ...
+class BatchError(ValueError): ...
+class ExecutionError(RuntimeError): ...
 class SimulationError(RuntimeError): ...
 class LsmError(RuntimeError): ...
 
@@ -25,6 +27,35 @@ class CpuExecutor:
     def threads(self) -> int: ...
 
 def build_info() -> tuple[str, str]: ...
+def bin_dividends_f32(
+    offsets: npt.NDArray[np.int64],
+    times: npt.NDArray[np.float64],
+    amounts: npt.NDArray[np.float64],
+    maturities: npt.NDArray[np.float64],
+    amount_scale: str,
+    bins: int,
+    horizon: float,
+    closure: str,
+    maturity_boundary: str,
+    executor: CpuExecutor,
+    spots: npt.NDArray[np.float64] | None,
+) -> npt.NDArray[np.float32]: ...
+def pack_padded_dividends_f32(
+    offsets: npt.NDArray[np.int64],
+    times: npt.NDArray[np.float64],
+    amounts: npt.NDArray[np.float64],
+    maturities: npt.NDArray[np.float64],
+    amount_scale: str,
+    capacity: int,
+    maturity_boundary: str,
+    executor: CpuExecutor,
+    spots: npt.NDArray[np.float64] | None,
+) -> tuple[
+    npt.NDArray[np.float32],
+    npt.NDArray[np.float32],
+    npt.NDArray[np.bool_],
+    npt.NDArray[np.uint32],
+]: ...
 def validate_cash_dividend_amount(amount: float) -> None: ...
 def validate_constant_volatility(annualized_decimal: float) -> None: ...
 def validate_event_schedule(
@@ -35,6 +66,11 @@ def validate_event_schedule(
     expiry_node: int,
 ) -> None: ...
 def validate_log_discount_curve(times: list[float], log_discounts: list[float]) -> None: ...
+def validate_ragged_cash_dividends_f64(
+    offsets: npt.NDArray[np.int64],
+    times: npt.NDArray[np.float64],
+    amounts: npt.NDArray[np.float64],
+) -> None: ...
 def simulate_gbm_f64(
     initial_spot: float,
     schedule_times: list[float],

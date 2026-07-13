@@ -246,8 +246,8 @@ mod tests {
         let stream = RandomStream::new(7, 11);
         let serial = plan.simulate_seeded(100.0, 257, stream).unwrap();
         let executor = CpuExecutor::try_new(4).unwrap();
-        let parallel = executor
-            .simulate_gbm_seeded(&plan, 100.0, 257, stream)
+        let parallel = plan
+            .simulate_seeded_with(&executor, 100.0, 257, stream)
             .unwrap();
         assert_eq!(bits(serial.as_slice()), bits(parallel.as_slice()));
 
@@ -280,8 +280,8 @@ mod tests {
     fn parallel_overflow_reports_the_deterministic_lowest_path() {
         let plan = plan();
         let executor = CpuExecutor::try_new(4).unwrap();
-        let error = executor
-            .simulate_gbm_seeded(&plan, f64::MAX, 257, RandomStream::new(7, 11))
+        let error = plan
+            .simulate_seeded_with(&executor, f64::MAX, 257, RandomStream::new(7, 11))
             .unwrap_err();
         assert!(matches!(
             error,

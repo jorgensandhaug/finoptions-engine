@@ -31,6 +31,7 @@ pin with a removal trigger.
 
 ## Architecture
 
-Dependency direction is `core <- sim <- lsm <- python`; `testkit` is non-production validation.
-Resolve runtime choices outside hot loops. Keep native entry points private behind the typed Python
-facade. Add abstractions only for variation required by a validated workload.
+`runtime` and `core` are independent foundations; `sim` depends on both, `batch` depends only on
+`runtime`, and `lsm` depends on `sim`. Python is the outer typed facade; `testkit` is non-production
+validation. Resolve runtime choices outside hot loops. Keep native entry points private behind the
+typed Python facade. Add abstractions only for variation required by a validated workload.

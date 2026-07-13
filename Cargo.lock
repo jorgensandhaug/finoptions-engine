@@ -245,6 +245,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "finoptions-batch"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "finoptions-runtime",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "finoptions-core"
 version = "0.1.0"
 dependencies = [
@@ -268,12 +278,22 @@ dependencies = [
 name = "finoptions-python"
 version = "0.1.0"
 dependencies = [
+ "finoptions-batch",
  "finoptions-core",
  "finoptions-lsm",
+ "finoptions-runtime",
  "finoptions-sim",
  "ndarray",
  "numpy",
  "pyo3",
+]
+
+[[package]]
+name = "finoptions-runtime"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "thiserror",
 ]
 
 [[package]]
@@ -282,6 +302,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "finoptions-core",
+ "finoptions-runtime",
  "rayon",
  "thiserror",
 ]
