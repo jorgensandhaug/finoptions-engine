@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from itertools import pairwise
+from math import erfc, exp, sqrt
+from typing import cast
 
 import numpy as np
 import pytest
@@ -12,13 +14,17 @@ from finoptions import (
     CpuExecutor,
     DividendPolicy,
     EventSchedule,
+    GbmPaths,
     InputError,
     LogDiscountCurve,
+    RandomStream,
     SimulationError,
     simulate_gbm,
+    simulate_gbm_seeded,
 )
 
 PATHS = 2
+TAIL_THRESHOLD = 3.0
 
 
 def inputs(
@@ -188,4 +194,124 @@ def test_executor_and_parallel_failure_reporting_are_strict_and_deterministic() 
             dividend_policy=DividendPolicy.LIQUIDATOR,
             executor=CpuExecutor(threads=2),
             normals=overflow,
+        )
+
+
+def test_seeded_paths_preserve_stream_identity_across_workers_and_batch_sizes() -> None:
+    """Seed/domain/path identity is independent of worker scheduling and larger path batches."""
+    schedule, curve, volatility = inputs()
+
+    def run(*, executor: CpuExecutor, paths: int, random_stream: RandomStream) -> GbmPaths:
+        return simulate_gbm_seeded(
+            initial_spot=100.0,
+            schedule=schedule,
+            curve=curve,
+            volatility=volatility,
+            dividend_policy=DividendPolicy.LIQUIDATOR,
+            executor=executor,
+            paths=paths,
+            random_stream=random_stream,
+        )
+
+    stream = RandomStream(seed=7, domain=11)
+    serial = run(executor=CpuExecutor(threads=1), paths=10_000, random_stream=stream)
+    parallel = run(executor=CpuExecutor(threads=4), paths=10_000, random_stream=stream)
+    larger = run(executor=CpuExecutor(threads=4), paths=10_013, random_stream=stream)
+
+    assert np.array_equal(serial.states, parallel.states)
+    assert np.array_equal(serial.states, larger.states[:, :10_000])
+    assert not serial.states.flags.writeable
+    different_domain = run(
+        executor=CpuExecutor(threads=4),
+        paths=10_000,
+        random_stream=RandomStream(seed=7, domain=12),
+    )
+    assert not np.array_equal(serial.states, different_domain.states)
+
+
+def test_seeded_public_contract_rejects_implicit_or_ambiguous_inputs() -> None:
+    """Random namespaces and path counts reject booleans, signs, ranges, and duck typing."""
+    with pytest.raises(InputError, match="seed must be a plain int"):
+        RandomStream(seed=True, domain=0)
+    with pytest.raises(InputError, match="seed must be a plain int"):
+        RandomStream(seed=-1, domain=0)
+    with pytest.raises(InputError, match="domain must be a plain int"):
+        RandomStream(seed=0, domain=2**32)
+
+    schedule, curve, volatility = inputs()
+
+    def run(*, paths: int, random_stream: RandomStream) -> GbmPaths:
+        return simulate_gbm_seeded(
+            initial_spot=100.0,
+            schedule=schedule,
+            curve=curve,
+            volatility=volatility,
+            dividend_policy=DividendPolicy.LIQUIDATOR,
+            executor=CpuExecutor(threads=1),
+            paths=paths,
+            random_stream=random_stream,
+        )
+
+    with pytest.raises(InputError, match="paths must be a plain int"):
+        run(paths=True, random_stream=RandomStream(seed=0, domain=0))
+    with pytest.raises(InputError, match="paths must be a plain int"):
+        run(paths=0, random_stream=RandomStream(seed=0, domain=0))
+    with pytest.raises(InputError, match="random_stream must be RandomStream"):
+        run(paths=1, random_stream=cast("RandomStream", (0, 0)))
+
+
+def test_seeded_normal_transform_and_risk_neutral_terminal_moment() -> None:
+    """A fixed large stream satisfies predeclared normal and exact GBM moment diagnostics."""
+    paths = 262_144
+    schedule = EventSchedule(
+        times=(0.0, 1.0),
+        dividends=(),
+        exercise_nodes=(),
+        expiry_node=1,
+    )
+    curve = LogDiscountCurve(times=(0.0, 1.0), log_discounts=(0.0, -0.05))
+    volatility = ConstantVolatility(0.20)
+    result = simulate_gbm_seeded(
+        initial_spot=100.0,
+        schedule=schedule,
+        curve=curve,
+        volatility=volatility,
+        dividend_policy=DividendPolicy.LIQUIDATOR,
+        executor=CpuExecutor(threads=4),
+        paths=paths,
+        random_stream=RandomStream(seed=0x01D6328F7A4C915B, domain=0x17290042),
+    )
+    terminal = result.states[0]
+    normals = (np.log(terminal / 100.0) - (0.05 - 0.5 * 0.20**2)) / 0.20
+
+    mean_tolerance = 5.0 / sqrt(paths)
+    variance_tolerance = 5.0 * sqrt(2.0 / (paths - 1))
+    assert abs(float(np.mean(normals))) <= mean_tolerance
+    assert abs(float(np.var(normals, ddof=1)) - 1.0) <= variance_tolerance
+
+    tail_probability = erfc(TAIL_THRESHOLD / sqrt(2.0))
+    tail_count = int(np.count_nonzero(np.abs(normals) > TAIL_THRESHOLD))
+    expected_tail_count = paths * tail_probability
+    tail_standard_deviation = sqrt(paths * tail_probability * (1.0 - tail_probability))
+    assert abs(tail_count - expected_tail_count) <= 6.0 * tail_standard_deviation
+
+    expected_terminal_mean = 100.0 * exp(0.05)
+    terminal_variance = 100.0**2 * exp(2.0 * 0.05) * (exp(0.20**2) - 1.0)
+    terminal_standard_error = sqrt(terminal_variance / paths)
+    assert abs(float(np.mean(terminal)) - expected_terminal_mean) <= 5.0 * terminal_standard_error
+
+
+def test_seeded_parallel_transition_failure_reports_lowest_path() -> None:
+    """Finite-input overflow remains a typed execution error with deterministic path context."""
+    schedule, curve, volatility = inputs()
+    with pytest.raises(SimulationError, match="path 0"):
+        simulate_gbm_seeded(
+            initial_spot=float.fromhex("0x1.fffffffffffffp+1023"),
+            schedule=schedule,
+            curve=curve,
+            volatility=volatility,
+            dividend_policy=DividendPolicy.LIQUIDATOR,
+            executor=CpuExecutor(threads=4),
+            paths=1_000,
+            random_stream=RandomStream(seed=7, domain=11),
         )

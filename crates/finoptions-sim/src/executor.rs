@@ -2,7 +2,7 @@
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
-use crate::{GbmPathPlan, SimulatedPaths, SimulationError};
+use crate::{GbmPathPlan, RandomStream, SimulatedPaths, SimulationError};
 
 /// Dedicated, explicitly sized CPU executor for reproducible path kernels.
 ///
@@ -64,6 +64,27 @@ impl CpuExecutor {
         match &self.pool {
             None => plan.simulate(initial_spot, paths, normals),
             Some(pool) => pool.install(|| plan.simulate_parallel(initial_spot, paths, normals)),
+        }
+    }
+
+    /// Generates and simulates GBM paths in one fused kernel using an explicit random namespace.
+    ///
+    /// # Errors
+    ///
+    /// Propagates strict simulation input, random-generation, or execution failures. The requested
+    /// worker count and random stream are never substituted.
+    pub fn simulate_gbm_seeded(
+        &self,
+        plan: &GbmPathPlan,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match &self.pool {
+            None => plan.simulate_seeded(initial_spot, paths, stream),
+            Some(pool) => {
+                pool.install(|| plan.simulate_seeded_parallel(initial_spot, paths, stream))
+            }
         }
     }
 }

@@ -21,6 +21,9 @@ from .model import (
 Float64Matrix = npt.NDArray[np.float64]
 SimulationError = _native.SimulationError
 _MATRIX_DIMENSIONS: Final = 2
+_MAX_SEED: Final = (2**64) - 1
+_MAX_DOMAIN: Final = (2**32) - 1
+_MAX_PATHS: Final = (2**32) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +39,27 @@ class CpuExecutor:
             msg = f"threads must be a positive plain int; observed {self.threads!r}"
             raise InputError(msg)
         object.__setattr__(self, "_handle", _native.CpuExecutor(self.threads))
+
+
+@dataclass(frozen=True, slots=True)
+class RandomStream:
+    """Explicit reproducible Philox namespace for one statistically distinct path set.
+
+    Use different `domain` values with the same seed for roles that must not reuse paths, such as
+    LSM policy fitting and independent policy evaluation.
+    """
+
+    seed: int
+    domain: int
+
+    def __post_init__(self) -> None:
+        """Reject inferred signs, booleans, and values outside the native counter layout."""
+        if type(self.seed) is not int or not 0 <= self.seed <= _MAX_SEED:
+            msg = f"seed must be a plain int in [0, {_MAX_SEED}]; observed {self.seed!r}"
+            raise InputError(msg)
+        if type(self.domain) is not int or not 0 <= self.domain <= _MAX_DOMAIN:
+            msg = f"domain must be a plain int in [0, {_MAX_DOMAIN}]; observed {self.domain!r}"
+            raise InputError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +166,20 @@ def _validate_normal_matrix(normals: Float64Matrix) -> None:
         raise InputError(msg)
 
 
+def _validate_initial_spot(initial_spot: float) -> None:
+    if type(initial_spot) is not float:
+        msg = f"initial_spot must be a plain float; observed {type(initial_spot).__name__}"
+        raise InputError(msg)
+
+
+def _paths_from_native(schedule: EventSchedule, states: Float64Matrix) -> GbmPaths:
+    states.flags.writeable = False
+    return GbmPaths(
+        observation_nodes=(*schedule.exercise_nodes, schedule.expiry_node),
+        states=states,
+    )
+
+
 def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independently typed
     *,
     initial_spot: float,
@@ -163,9 +201,7 @@ def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independen
         SimulationError: If a mathematically valid input produces a non-finite path transition.
 
     """
-    if type(initial_spot) is not float:
-        msg = f"initial_spot must be a plain float; observed {type(initial_spot).__name__}"
-        raise InputError(msg)
+    _validate_initial_spot(initial_spot)
     _validate_simulation_specs(schedule, curve, volatility, dividend_policy, executor)
     _validate_normal_matrix(normals)
 
@@ -183,11 +219,65 @@ def simulate_gbm(  # noqa: PLR0913 - each explicit financial input is independen
         executor._handle,  # noqa: SLF001 - wrapper owns the private native resource
         normals,
     )
-    states.flags.writeable = False
-    return GbmPaths(
-        observation_nodes=(*schedule.exercise_nodes, schedule.expiry_node),
-        states=states,
+    return _paths_from_native(schedule, states)
+
+
+def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is independently typed
+    *,
+    initial_spot: float,
+    schedule: EventSchedule,
+    curve: LogDiscountCurve,
+    volatility: ConstantVolatility,
+    dividend_policy: DividendPolicy,
+    executor: CpuExecutor,
+    paths: int,
+    random_stream: RandomStream,
+) -> GbmPaths:
+    """Generate and evolve reproducible GBM paths without allocating a shock matrix.
+
+    Path `i` is determined by `(seed, domain, i)` and is invariant to worker count and scheduling on
+    the same numerical build. The engine uses Random123-compatible Philox4x32-10 and a bounded
+    ZIGNOR standard-normal transform. A counter-budget or rejection-limit failure raises instead of
+    changing the stream, sampler, precision, or backend.
+
+    Raises:
+        InputError: If a runtime type, grid, path count, or financial input is invalid.
+        SimulationError: If random generation or a finite-input path transition fails.
+
+    """
+    _validate_initial_spot(initial_spot)
+    _validate_simulation_specs(schedule, curve, volatility, dividend_policy, executor)
+    if type(paths) is not int or not 1 <= paths <= _MAX_PATHS:
+        msg = f"paths must be a plain int in [1, {_MAX_PATHS}]; observed {paths!r}"
+        raise InputError(msg)
+    if type(random_stream) is not RandomStream:
+        msg = f"random_stream must be RandomStream; observed {type(random_stream).__name__}"
+        raise InputError(msg)
+
+    states = _native.simulate_gbm_seeded_f64(
+        initial_spot,
+        list(schedule.times),
+        list(curve.times),
+        list(curve.log_discounts),
+        [dividend.node for dividend in schedule.dividends],
+        [dividend.amount for dividend in schedule.dividends],
+        list(schedule.exercise_nodes),
+        schedule.expiry_node,
+        volatility.annualized_decimal,
+        dividend_policy.value,
+        executor._handle,  # noqa: SLF001 - wrapper owns the private native resource
+        paths,
+        random_stream.seed,
+        random_stream.domain,
     )
+    return _paths_from_native(schedule, states)
 
 
-__all__ = ["CpuExecutor", "GbmPaths", "SimulationError", "simulate_gbm"]
+__all__ = [
+    "CpuExecutor",
+    "GbmPaths",
+    "RandomStream",
+    "SimulationError",
+    "simulate_gbm",
+    "simulate_gbm_seeded",
+]

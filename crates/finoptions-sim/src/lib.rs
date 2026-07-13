@@ -3,9 +3,11 @@
 mod error;
 mod executor;
 mod path;
+mod random;
 mod step;
 
 pub use error::SimulationError;
 pub use executor::CpuExecutor;
 pub use path::{GbmPathPlan, SimulatedPaths};
+pub use random::RandomStream;
 pub use step::GbmStep;

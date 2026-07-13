@@ -28,6 +28,17 @@ pub enum SimulationError {
     #[error("simulation path count must be positive")]
     EmptyPathSet,
 
+    /// A seeded simulation exceeded the explicit 32-bit path counter lane.
+    #[error(
+        "seeded simulation supports at most {maximum} paths in one random domain; observed {paths}"
+    )]
+    RandomPathNamespaceOverflow {
+        /// Requested path count.
+        paths: usize,
+        /// Maximum path count supported by the counter layout.
+        maximum: u32,
+    },
+
     /// A CPU executor requested no worker threads.
     #[error("CPU executor thread count must be positive")]
     EmptyThreadPool,
@@ -39,6 +50,15 @@ pub enum SimulationError {
         threads: usize,
         /// Stable upstream failure message.
         reason: String,
+    },
+
+    /// A deterministic diagnostic replay did not reproduce a parallel worker failure.
+    #[error(
+        "parallel seeded simulation reported path {path} as failed, but deterministic diagnostic replay succeeded"
+    )]
+    ParallelFailureReplayMismatch {
+        /// Lowest path reported as failing by the parallel kernel.
+        path: usize,
     },
 
     /// A requested buffer shape overflowed the platform index domain.
@@ -93,6 +113,28 @@ pub enum SimulationError {
         path: usize,
         /// Invalid variate.
         observed: f64,
+    },
+
+    /// A seeded path requested more normals than its exact interval budget.
+    #[error(
+        "random-normal budget exhausted at interval {interval}, path {path}; this indicates an internal estimator-contract violation"
+    )]
+    RandomNormalBudgetExhausted {
+        /// Zero-based adjacent interval.
+        interval: usize,
+        /// Zero-based path.
+        path: usize,
+    },
+
+    /// Bounded ZIGNOR generation did not accept a variate within its declared limit.
+    #[error(
+        "random-normal rejection limit reached at interval {interval}, path {path}; no variate or fallback was produced"
+    )]
+    RandomNormalRejectionLimit {
+        /// Zero-based adjacent interval.
+        interval: usize,
+        /// Zero-based path.
+        path: usize,
     },
 
     /// A scalar transition overflowed or otherwise produced a non-finite stock state.

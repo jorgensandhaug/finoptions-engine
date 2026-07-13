@@ -31,7 +31,11 @@ python-source = "python"
 module-name = "finoptions._native"
 features = ["extension-module"]
 locked = true
-include = [{ path = "rust-toolchain.toml", format = "sdist" }]
+include = [
+  { path = "rust-toolchain.toml", format = "sdist" },
+  { path = "THIRD_PARTY_NOTICES.md", format = ["sdist", "wheel"] },
+  { path = "third_party/rust-random/**/*", format = ["sdist", "wheel"] },
+]
 
 [tool.pytest.ini_options]
 addopts = ["--strict-config", "--strict-markers"]

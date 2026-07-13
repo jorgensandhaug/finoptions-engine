@@ -4,7 +4,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use finoptions_core::{
     ConstantVolatility, DividendPolicy, EventSchedule, LogDiscountCurve, TimeGrid,
 };
-use finoptions_sim::{CpuExecutor, GbmPathPlan};
+use finoptions_sim::{CpuExecutor, GbmPathPlan, RandomStream};
 
 const INTERVALS: usize = 32;
 const PATH_COUNTS: [usize; 2] = [1_000, 100_000];
@@ -52,14 +52,14 @@ fn varied_normals(values: usize) -> Vec<f64> {
 
 fn benchmark_gbm_paths(criterion: &mut Criterion) {
     let plan = plan();
-    let mut group = criterion.benchmark_group("gbm_paths_f64");
+    let mut external = criterion.benchmark_group("gbm_paths_external_f64");
     for paths in PATH_COUNTS {
         let values = INTERVALS.checked_mul(paths).unwrap();
         let normals = varied_normals(values);
-        group.throughput(Throughput::Elements(u64::try_from(values).unwrap()));
+        external.throughput(Throughput::Elements(u64::try_from(values).unwrap()));
         for threads in THREAD_COUNTS {
             let executor = CpuExecutor::try_new(threads).unwrap();
-            group.bench_function(
+            external.bench_function(
                 BenchmarkId::new(format!("{threads}_threads"), paths),
                 |bencher| {
                     bencher.iter(|| {
@@ -71,7 +71,28 @@ fn benchmark_gbm_paths(criterion: &mut Criterion) {
             );
         }
     }
-    group.finish();
+    external.finish();
+
+    let stream = RandomStream::new(0x01d6_328f_7a4c_915b, 0x1729_0042);
+    let mut seeded = criterion.benchmark_group("gbm_paths_seeded_f64");
+    for paths in PATH_COUNTS {
+        let transitions = INTERVALS.checked_mul(paths).unwrap();
+        seeded.throughput(Throughput::Elements(u64::try_from(transitions).unwrap()));
+        for threads in THREAD_COUNTS {
+            let executor = CpuExecutor::try_new(threads).unwrap();
+            seeded.bench_function(
+                BenchmarkId::new(format!("{threads}_threads"), paths),
+                |bencher| {
+                    bencher.iter(|| {
+                        executor
+                            .simulate_gbm_seeded(&plan, black_box(100.0), paths, black_box(stream))
+                            .unwrap()
+                    });
+                },
+            );
+        }
+    }
+    seeded.finish();
 }
 
 criterion_group!(benches, benchmark_gbm_paths);

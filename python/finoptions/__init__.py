@@ -13,7 +13,14 @@ from .model import (
     InputError,
     LogDiscountCurve,
 )
-from .simulation import CpuExecutor, GbmPaths, SimulationError, simulate_gbm
+from .simulation import (
+    CpuExecutor,
+    GbmPaths,
+    RandomStream,
+    SimulationError,
+    simulate_gbm,
+    simulate_gbm_seeded,
+)
 
 
 class BuildInfo(NamedTuple):
@@ -39,8 +46,10 @@ __all__ = [
     "GbmPaths",
     "InputError",
     "LogDiscountCurve",
+    "RandomStream",
     "SimulationError",
     "__version__",
     "build_info",
     "simulate_gbm",
+    "simulate_gbm_seeded",
 ]

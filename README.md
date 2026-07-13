@@ -5,9 +5,10 @@ engine. It presents one small typed Python package backed by safe, dependency-is
 
 The first supported slice is deliberately narrow: event-aligned deterministic cash dividends,
 node-aligned deterministic discount factors, constant-volatility risk-neutral GBM, explicit finite
-exercise schedules, and exact serial/parallel path simulation from caller-supplied normal variates.
-The LSM estimator remains behind its solver evidence gate. Unsupported semantics fail; the engine
-never substitutes a nearby model, algorithm, precision, event time, or backend.
+exercise schedules, and exact serial/parallel path dynamics from either explicit normal variates or
+path-addressable seeded streams. The LSM estimator remains behind its solver evidence gate.
+Unsupported semantics fail; the engine never substitutes a nearby model, algorithm, precision,
+event time, random stream, or backend.
 
 ## Development
 
@@ -43,30 +44,32 @@ Exercise at a dividend node occurs in the pre-dividend state; expiry is a separa
 Execution resources are equally explicit and reusable:
 
 ```python
-import numpy as np
 from finoptions import (
     ConstantVolatility,
     CpuExecutor,
     DividendPolicy,
-    simulate_gbm,
+    RandomStream,
+    simulate_gbm_seeded,
 )
 
-rng = np.random.default_rng(7)
-normals = np.ascontiguousarray(rng.standard_normal((2, 100_000)), dtype=np.float64)
-paths = simulate_gbm(
+paths = simulate_gbm_seeded(
     initial_spot=100.0,
     schedule=schedule,
     curve=curve,
     volatility=ConstantVolatility(0.20),
     dividend_policy=DividendPolicy.LIQUIDATOR,
     executor=CpuExecutor(threads=4),
-    normals=normals,
+    paths=100_000,
+    random_stream=RandomStream(seed=7, domain=1),
 )
 ```
 
-The normal matrix is borrowed without conversion, only exercise/expiry rows are allocated, and a
-dedicated executor never falls back to the global thread pool or another backend. No pricing method
-is exported until its complete estimator and independent validation gate pass.
+The seeded kernel fuses random generation and path evolution without allocating an interval-by-path
+normal matrix. Seed, domain, and path index define stream identity; use distinct domains for path
+sets that must be independent. The explicit-normal `simulate_gbm` route remains available for
+audits and externally generated variance-reduction designs. A dedicated executor never falls back
+to the global thread pool or another backend. No pricing method is exported until its complete
+estimator and independent validation gate pass.
 
 The repository is private, not yet licensed for redistribution, and no package publication is
 authorized.

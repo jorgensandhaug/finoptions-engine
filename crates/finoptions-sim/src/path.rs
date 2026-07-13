@@ -1,5 +1,7 @@
 //! Time-major path simulation with explicit event-phase ordering.
 
+mod seeded;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use finoptions_core::{
@@ -301,14 +303,7 @@ impl GbmPathPlan {
         current: &[f64],
         output: &[f64],
     ) -> Result<(), SimulationError> {
-        if !initial_spot.is_finite()
-            || initial_spot < 0.0
-            || (initial_spot == 0.0 && initial_spot.is_sign_negative())
-        {
-            return Err(SimulationError::InvalidInitialSpot {
-                observed: initial_spot,
-            });
-        }
+        Self::validate_initial_spot(initial_spot)?;
 
         let normal_values = self.required_normal_values(paths)?;
         if normals.len() != normal_values {
@@ -342,6 +337,18 @@ impl GbmPathPlan {
                 interval: index / paths,
                 path: index % paths,
                 observed,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_initial_spot(initial_spot: f64) -> Result<(), SimulationError> {
+        if !initial_spot.is_finite()
+            || initial_spot < 0.0
+            || (initial_spot == 0.0 && initial_spot.is_sign_negative())
+        {
+            return Err(SimulationError::InvalidInitialSpot {
+                observed: initial_spot,
             });
         }
         Ok(())

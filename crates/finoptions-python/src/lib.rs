@@ -5,7 +5,8 @@ use finoptions_core::{
     LogDiscountCurve, TimeGrid,
 };
 use finoptions_sim::{
-    CpuExecutor as CoreCpuExecutor, GbmPathPlan, SimulationError as CoreSimulationError,
+    CpuExecutor as CoreCpuExecutor, GbmPathPlan, RandomStream as CoreRandomStream, SimulatedPaths,
+    SimulationError as CoreSimulationError,
 };
 use ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
@@ -56,7 +57,10 @@ impl IntoPySimulationError for CoreSimulationError {
         let message = self.to_string();
         match self {
             CoreSimulationError::NonFiniteTransition { .. }
-            | CoreSimulationError::NonFinitePathTransition { .. } => {
+            | CoreSimulationError::NonFinitePathTransition { .. }
+            | CoreSimulationError::RandomNormalBudgetExhausted { .. }
+            | CoreSimulationError::RandomNormalRejectionLimit { .. }
+            | CoreSimulationError::ParallelFailureReplayMismatch { .. } => {
                 SimulationError::new_err(message)
             }
             _ => InputError::new_err(message),
@@ -149,11 +153,8 @@ fn validate_log_discount_curve(times: Vec<f64>, log_discounts: Vec<f64>) -> PyRe
         .map_err(CoreInputError::into_py_input_error)
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-#[pyfunction]
-fn simulate_gbm_f64<'py>(
-    py: Python<'py>,
-    initial_spot: f64,
+#[allow(clippy::too_many_arguments)]
+fn parse_gbm_plan(
     schedule_times: Vec<f64>,
     curve_times: Vec<f64>,
     log_discounts: Vec<f64>,
@@ -163,9 +164,7 @@ fn simulate_gbm_f64<'py>(
     expiry_node: u32,
     annualized_volatility: f64,
     dividend_policy: &str,
-    executor: PyRef<'py, NativeCpuExecutor>,
-    normals: PyReadonlyArray2<'py, f64>,
-) -> PyResult<Bound<'py, PyArray2<f64>>> {
+) -> PyResult<GbmPathPlan> {
     let schedule = parse_event_schedule(
         schedule_times,
         dividend_nodes,
@@ -188,8 +187,50 @@ fn simulate_gbm_f64<'py>(
             )));
         }
     };
-    let plan = GbmPathPlan::try_new(&schedule, &curve, volatility, policy)
-        .map_err(CoreSimulationError::into_py_simulation_error)?;
+    GbmPathPlan::try_new(&schedule, &curve, volatility, policy)
+        .map_err(CoreSimulationError::into_py_simulation_error)
+}
+
+fn simulated_into_array(
+    py: Python<'_>,
+    simulated: SimulatedPaths,
+) -> PyResult<Bound<'_, PyArray2<f64>>> {
+    let rows = simulated.observation_nodes().len();
+    let paths = simulated.path_count();
+    let values = simulated.into_values();
+    let array = Array2::from_shape_vec((rows, paths), values)
+        .map_err(|error| SimulationError::new_err(error.to_string()))?;
+    Ok(array.into_pyarray(py))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn simulate_gbm_f64<'py>(
+    py: Python<'py>,
+    initial_spot: f64,
+    schedule_times: Vec<f64>,
+    curve_times: Vec<f64>,
+    log_discounts: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+    annualized_volatility: f64,
+    dividend_policy: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    normals: PyReadonlyArray2<'py, f64>,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let plan = parse_gbm_plan(
+        schedule_times,
+        curve_times,
+        log_discounts,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+        annualized_volatility,
+        dividend_policy,
+    )?;
 
     let shape = normals.shape();
     if shape[0] != plan.intervals() {
@@ -206,11 +247,45 @@ fn simulate_gbm_f64<'py>(
     let simulated = py
         .detach(move || core_executor.simulate_gbm(&plan, initial_spot, paths, normal_values))
         .map_err(CoreSimulationError::into_py_simulation_error)?;
-    let rows = simulated.observation_nodes().len();
-    let values = simulated.into_values();
-    let array = Array2::from_shape_vec((rows, paths), values)
-        .map_err(|error| SimulationError::new_err(error.to_string()))?;
-    Ok(array.into_pyarray(py))
+    simulated_into_array(py, simulated)
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn simulate_gbm_seeded_f64<'py>(
+    py: Python<'py>,
+    initial_spot: f64,
+    schedule_times: Vec<f64>,
+    curve_times: Vec<f64>,
+    log_discounts: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+    annualized_volatility: f64,
+    dividend_policy: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    paths: usize,
+    seed: u64,
+    domain: u32,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let plan = parse_gbm_plan(
+        schedule_times,
+        curve_times,
+        log_discounts,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+        annualized_volatility,
+        dividend_policy,
+    )?;
+    let stream = CoreRandomStream::new(seed, domain);
+    let core_executor = &executor.inner;
+    let simulated = py
+        .detach(move || core_executor.simulate_gbm_seeded(&plan, initial_spot, paths, stream))
+        .map_err(CoreSimulationError::into_py_simulation_error)?;
+    simulated_into_array(py, simulated)
 }
 
 /// Private native module.
@@ -221,6 +296,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SimulationError", module.py().get_type::<SimulationError>())?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
+    module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;
     module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
     module.add_function(wrap_pyfunction!(validate_event_schedule, module)?)?;

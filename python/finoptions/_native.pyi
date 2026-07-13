@@ -34,3 +34,19 @@ def simulate_gbm_f64(
     executor: CpuExecutor,
     normals: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.float64]: ...
+def simulate_gbm_seeded_f64(
+    initial_spot: float,
+    schedule_times: list[float],
+    curve_times: list[float],
+    log_discounts: list[float],
+    dividend_nodes: list[int],
+    dividend_amounts: list[float],
+    exercise_nodes: list[int],
+    expiry_node: int,
+    annualized_volatility: float,
+    dividend_policy: str,
+    executor: CpuExecutor,
+    paths: int,
+    seed: int,
+    domain: int,
+) -> npt.NDArray[np.float64]: ...
