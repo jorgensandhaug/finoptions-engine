@@ -5,6 +5,17 @@ from __future__ import annotations
 from typing import Final, NamedTuple
 
 from . import _native
+from .lsm import (
+    ExerciseFitDiagnostics,
+    ExerciseTieRule,
+    Lsm,
+    LsmError,
+    LsmResult,
+    NoInTheMoneyPathsDiagnostics,
+    OriginDecisionDiagnostics,
+    RegressionFitDiagnostics,
+    price_lsm_call,
+)
 from .model import (
     CashDividend,
     ConstantVolatility,
@@ -43,13 +54,22 @@ __all__ = [
     "CpuExecutor",
     "DividendPolicy",
     "EventSchedule",
+    "ExerciseFitDiagnostics",
+    "ExerciseTieRule",
     "GbmPaths",
     "InputError",
     "LogDiscountCurve",
+    "Lsm",
+    "LsmError",
+    "LsmResult",
+    "NoInTheMoneyPathsDiagnostics",
+    "OriginDecisionDiagnostics",
     "RandomStream",
+    "RegressionFitDiagnostics",
     "SimulationError",
     "__version__",
     "build_info",
+    "price_lsm_call",
     "simulate_gbm",
     "simulate_gbm_seeded",
 ]

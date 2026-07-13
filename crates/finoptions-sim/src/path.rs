@@ -10,12 +10,12 @@ use finoptions_core::{
 };
 use rayon::prelude::*;
 
-use crate::{GbmStep, SimulationError};
+use crate::{GbmStep, RandomStream, SimulationError};
 
 /// Immutable plan for GBM paths observed immediately before exercise/expiry decisions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GbmPathPlan {
-    grid: TimeGrid,
+    curve: LogDiscountCurve,
     steps: Box<[GbmStep]>,
     dividends_by_node: Box<[Option<CashDividend>]>,
     observation_nodes: Box<[NodeId]>,
@@ -42,7 +42,7 @@ impl GbmPathPlan {
             return Err(SimulationError::TimeGridMismatch);
         }
 
-        let grid = schedule.grid().clone();
+        let grid = schedule.grid();
         let mut steps = Vec::with_capacity(grid.len() - 1);
         for to_index in 1..grid.len() {
             steps.push(GbmStep::try_new(
@@ -63,7 +63,7 @@ impl GbmPathPlan {
         observation_nodes.push(schedule.expiry());
 
         Ok(Self {
-            grid,
+            curve: curve.clone(),
             steps: steps.into_boxed_slice(),
             dividends_by_node: dividends_by_node.into_boxed_slice(),
             observation_nodes: observation_nodes.into_boxed_slice(),
@@ -74,7 +74,13 @@ impl GbmPathPlan {
     /// Borrows the exact event-aligned model grid.
     #[must_use]
     pub const fn grid(&self) -> &TimeGrid {
-        &self.grid
+        self.curve.grid()
+    }
+
+    /// Borrows the exact discount curve used to construct every risk-neutral transition.
+    #[must_use]
+    pub const fn curve(&self) -> &LogDiscountCurve {
+        &self.curve
     }
 
     /// Borrows exercise nodes followed by terminal expiry.
@@ -116,7 +122,9 @@ impl GbmPathPlan {
         let mut values = vec![0.0; output_values];
         self.simulate_into(initial_spot, paths, normals, &mut current, &mut values)?;
         Ok(SimulatedPaths {
-            observation_nodes: self.observation_nodes.clone(),
+            plan: self.clone(),
+            random_stream: None,
+            initial_spot,
             paths,
             values,
         })
@@ -149,7 +157,9 @@ impl GbmPathPlan {
             true,
         )?;
         Ok(SimulatedPaths {
-            observation_nodes: self.observation_nodes.clone(),
+            plan: self.clone(),
+            random_stream: None,
+            initial_spot,
             paths,
             values,
         })
@@ -358,16 +368,48 @@ impl GbmPathPlan {
 /// Owned time-major pre-event states at exercise nodes and expiry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulatedPaths {
-    observation_nodes: Box<[NodeId]>,
+    plan: GbmPathPlan,
+    random_stream: Option<RandomStream>,
+    initial_spot: f64,
     paths: usize,
     values: Vec<f64>,
 }
 
 impl SimulatedPaths {
+    /// Borrows the complete immutable GBM plan that generated this population.
+    #[must_use]
+    pub const fn path_plan(&self) -> &GbmPathPlan {
+        &self.plan
+    }
+
+    /// Borrows the exact model grid that defines every observation node.
+    #[must_use]
+    pub const fn grid(&self) -> &TimeGrid {
+        self.plan.grid()
+    }
+
+    /// Borrows the exact discount curve that generated the risk-neutral path dynamics.
+    #[must_use]
+    pub const fn curve(&self) -> &LogDiscountCurve {
+        self.plan.curve()
+    }
+
+    /// Returns the exact seeded namespace, or `None` for externally supplied normal variates.
+    #[must_use]
+    pub const fn random_stream(&self) -> Option<RandomStream> {
+        self.random_stream
+    }
+
+    /// Returns the exact common pre-event state at the valuation origin.
+    #[must_use]
+    pub const fn initial_spot(&self) -> f64 {
+        self.initial_spot
+    }
+
     /// Borrows exercise nodes followed by terminal expiry.
     #[must_use]
     pub const fn observation_nodes(&self) -> &[NodeId] {
-        &self.observation_nodes
+        self.plan.observation_nodes()
     }
 
     /// Returns the number of paths in every time-major row.
@@ -391,7 +433,7 @@ impl SimulatedPaths {
     /// Borrows all path states at one observation node, if the node is observed.
     #[must_use]
     pub fn values_at(&self, node: NodeId) -> Option<&[f64]> {
-        let row = self.observation_nodes.binary_search(&node).ok()?;
+        let row = self.plan.observation_nodes.binary_search(&node).ok()?;
         let start = row * self.paths;
         Some(&self.values[start..start + self.paths])
     }

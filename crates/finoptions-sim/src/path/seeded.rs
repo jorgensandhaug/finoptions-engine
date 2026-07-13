@@ -35,7 +35,9 @@ impl GbmPathPlan {
         }
         let values = self.transpose_seeded(&path_major, paths, false);
         Ok(SimulatedPaths {
-            observation_nodes: self.observation_nodes.clone(),
+            plan: self.clone(),
+            random_stream: Some(stream),
+            initial_spot,
             paths,
             values,
         })
@@ -84,7 +86,9 @@ impl GbmPathPlan {
 
         let values = self.transpose_seeded(&path_major, paths, true);
         Ok(SimulatedPaths {
-            observation_nodes: self.observation_nodes.clone(),
+            plan: self.clone(),
+            random_stream: Some(stream),
+            initial_spot,
             paths,
             values,
         })
@@ -101,7 +105,7 @@ impl GbmPathPlan {
             paths,
             maximum: u32::MAX,
         })?;
-        let final_node = self.grid.node_id(self.grid.len() - 1)?;
+        let final_node = self.grid().node_id(self.grid().len() - 1)?;
         Ok((final_node.get(), output_values))
     }
 

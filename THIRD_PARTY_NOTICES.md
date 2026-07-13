@@ -22,3 +22,14 @@ retained. Random123 itself is available under a BSD-style license from its autho
 
 - Project and paper: <https://random123.com/>
 - Rust cross-check source: <https://github.com/pawlenartowicz/rand_philox>
+
+## BLAKE3
+
+`blake3` 1.8.5 is used unmodified to identify externally supplied simulation populations so the
+same population cannot silently be used for both policy fitting and evaluation. The project is
+offered under CC0 1.0, Apache License 2.0, or Apache License 2.0 with the LLVM exception; this
+distribution uses it under Apache License 2.0.
+
+- Source: <https://github.com/BLAKE3-team/BLAKE3>
+- Apache license: `third_party/rust-random/LICENSE-APACHE`
+- Copyright and license choice: `third_party/blake3/COPYRIGHT`

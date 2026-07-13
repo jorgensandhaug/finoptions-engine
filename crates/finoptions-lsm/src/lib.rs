@@ -1,7 +1,18 @@
 //! Independently fitted and evaluated least-squares Monte Carlo.
 
-/// Marker returned while the production regression solver remains behind its evidence gate.
-///
-/// No fallback or placeholder estimator is exported.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LsmCrate;
+mod error;
+mod policy;
+mod regression;
+
+pub use error::{LsmError, RegressionError};
+pub use policy::{
+    ExerciseFitDiagnostics, ExerciseNodeDiagnostics, ExerciseTieRule, FittedLsmCallPolicy,
+    LsmCallEstimator, LsmEvaluation, LsmRun,
+};
+pub use regression::{
+    MAX_POLYNOMIAL_DEGREE, PolynomialDegree, PolynomialRegressionSpec, RegressionDiagnostics,
+};
+
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub use regression::RegressionBenchmark;

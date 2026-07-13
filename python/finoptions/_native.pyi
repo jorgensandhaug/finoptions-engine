@@ -3,6 +3,21 @@ import numpy.typing as npt
 
 class InputError(ValueError): ...
 class SimulationError(RuntimeError): ...
+class LsmError(RuntimeError): ...
+
+type NativeExerciseDiagnostic = tuple[
+    int,
+    str,
+    bool | None,
+    float | None,
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+    float | None,
+    float | None,
+    float | None,
+]
 
 class CpuExecutor:
     def __init__(self, threads: int) -> None: ...
@@ -50,3 +65,35 @@ def simulate_gbm_seeded_f64(
     seed: int,
     domain: int,
 ) -> npt.NDArray[np.float64]: ...
+def price_lsm_call_seeded_f64(
+    initial_spot: float,
+    strike: float,
+    schedule_times: list[float],
+    curve_times: list[float],
+    log_discounts: list[float],
+    dividend_nodes: list[int],
+    dividend_amounts: list[float],
+    exercise_nodes: list[int],
+    expiry_node: int,
+    annualized_volatility: float,
+    dividend_policy: str,
+    executor: CpuExecutor,
+    training_paths: int,
+    evaluation_paths: int,
+    training_seed: int,
+    training_domain: int,
+    evaluation_seed: int,
+    evaluation_domain: int,
+    polynomial_degree: int,
+    rank_tolerance: float,
+    condition_limit: float,
+    tie_rule: str,
+) -> tuple[
+    float,
+    int,
+    float | None,
+    float | None,
+    list[int],
+    list[int],
+    list[NativeExerciseDiagnostic],
+]: ...

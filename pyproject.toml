@@ -22,7 +22,7 @@ dev = [
   "maturin==1.14.1",
   "pytest==9.1.1",
   "ruff==0.15.21",
-  "ty==0.0.58",
+  "ty==0.0.59",
 ]
 
 [tool.maturin]
@@ -34,6 +34,7 @@ locked = true
 include = [
   { path = "rust-toolchain.toml", format = "sdist" },
   { path = "THIRD_PARTY_NOTICES.md", format = ["sdist", "wheel"] },
+  { path = "third_party/blake3/**/*", format = ["sdist", "wheel"] },
   { path = "third_party/rust-random/**/*", format = ["sdist", "wheel"] },
 ]
 
