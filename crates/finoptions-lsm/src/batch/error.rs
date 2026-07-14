@@ -228,6 +228,13 @@ pub enum BatchLsmError {
         rows: usize,
     },
 
+    /// The parallel grouped scheduler could not allocate its disjoint slice descriptors.
+    #[error("LSM batch could not allocate parallel partition metadata for {groups} groups")]
+    ParallelGroupPartitionAllocationFailed {
+        /// Requested simulation groups.
+        groups: usize,
+    },
+
     /// An exact cash-event time was unexpectedly absent from its constructed union mesh.
     #[error(
         "cash dividend at batch row {row}, event {event}, time {time:?} is absent from its exact union mesh"

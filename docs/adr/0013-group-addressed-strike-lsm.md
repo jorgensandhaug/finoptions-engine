@@ -32,8 +32,11 @@ but each contract retains its own valid out-of-sample estimator and diagnostics.
 
 Training paths are simulated once, all strike policies are fitted, and the training matrix is
 released before the evaluation matrix is allocated. Evaluation paths are then simulated once and
-used by each fitted policy. Groups execute in parallel; row order is preserved, the lowest failed
-group and strike wins deterministic error selection, and no partial result escapes.
+used by each fitted policy. Before parallel dispatch, the row output is safely partitioned into one
+disjoint mutable slice per group. Rayon's indexed scheduler operates on those slice descriptors;
+no unsafe aliasing or bespoke leaf-one task tree is used. Row order is preserved, the lowest failed
+group and strike wins deterministic serial error replay, partition-allocation failure is typed, and
+no partial result escapes.
 
 The Python type `LsmStrikeGroups` accepts only plain, one-dimensional, C-contiguous NumPy arrays of
 the exact declared dtype. It does not sort, copy, collapse, or validate equality of source rows.
@@ -51,6 +54,9 @@ an opaque row-wise lazy expression.
   diagnostics, and stopping counts; different strikes retain different results.
 - Serial and parallel grouped execution are bitwise identical for all three dividend
   representations.
+- The indexed scheduler completes a 74,215-group boundary matching the reconstructed project
+  cohort's exact group count, and a separate test proves that parallel failures replay the same
+  lowest contract row as serial execution.
 - Rust and Python tests reject malformed offsets and compact axes without repair or fallback.
 - The project-shaped Apple Silicon measurements are recorded in
   [`../performance/2026-07-14-grouped-strike-lsm.md`](../performance/2026-07-14-grouped-strike-lsm.md).

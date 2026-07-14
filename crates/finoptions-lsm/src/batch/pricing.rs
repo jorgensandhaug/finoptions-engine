@@ -23,8 +23,6 @@ use super::{
     EscrowedVolatilityConvention, GroupedBatchLsmCallInputs, OriginExercise,
 };
 
-const GROUP_PARALLEL_LEAF: usize = 1;
-
 #[derive(Clone, Copy)]
 struct RowDividendModel<'a> {
     cash_schedule: Option<CashDividendRow<'a>>,
@@ -388,44 +386,47 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         rows.try_reserve_exact(self.rows())
             .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: self.rows() })?;
         rows.resize(self.rows(), BatchLsmCallRowResult::default());
-        self.price_group_range(method, math_backend, 0, self.groups(), &mut rows)?;
-        Ok(BatchLsmCallResult { rows })
-    }
-
-    fn price_group_range(
-        self,
-        method: BatchLsmCallMethod,
-        math_backend: CpuMathBackend,
-        group_start: usize,
-        group_end: usize,
-        output: &mut [BatchLsmCallRowResult],
-    ) -> Result<(), BatchLsmError> {
-        if group_end - group_start <= GROUP_PARALLEL_LEAF {
-            let base_row = self.group_range(group_start).start;
-            for group in group_start..group_end {
-                let range = self.group_range(group);
-                let local_start = range.start - base_row;
-                let local_end = range.end - base_row;
-                self.price_group_into(
-                    method,
-                    math_backend,
-                    group,
-                    &mut output[local_start..local_end],
-                )?;
-            }
-            return Ok(());
+        let mut group_outputs = Vec::new();
+        group_outputs
+            .try_reserve_exact(self.groups())
+            .map_err(|_| BatchLsmError::ParallelGroupPartitionAllocationFailed {
+                groups: self.groups(),
+            })?;
+        let mut remaining = rows.as_mut_slice();
+        for group in 0..self.groups() {
+            let group_rows = self.group_range(group).len();
+            let (output, tail) = remaining.split_at_mut(group_rows);
+            group_outputs.push(output);
+            remaining = tail;
         }
-        let middle_group = group_start + (group_end - group_start) / 2;
-        let base_row = self.group_range(group_start).start;
-        let middle_row = self.group_range(middle_group).start - base_row;
-        let (left_output, right_output) = output.split_at_mut(middle_row);
-        let (left, right) = rayon::join(
-            || self.price_group_range(method, math_backend, group_start, middle_group, left_output),
-            || self.price_group_range(method, math_backend, middle_group, group_end, right_output),
-        );
-        match (left, right) {
-            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
+        debug_assert!(remaining.is_empty());
+
+        let first_failure = AtomicUsize::new(usize::MAX);
+        group_outputs
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(group, output)| {
+                if group > first_failure.load(Ordering::Relaxed) {
+                    return;
+                }
+                if self
+                    .price_group_into(method, math_backend, group, output)
+                    .is_err()
+                {
+                    first_failure.fetch_min(group, Ordering::Relaxed);
+                }
+            });
+        drop(group_outputs);
+
+        let failed_group = first_failure.load(Ordering::Relaxed);
+        if failed_group == usize::MAX {
+            return Ok(BatchLsmCallResult { rows });
+        }
+        let failed_range = self.group_range(failed_group);
+        let failed_row = failed_range.start;
+        match self.price_group_into(method, math_backend, failed_group, &mut rows[failed_range]) {
+            Err(error) => Err(error),
+            Ok(()) => Err(BatchLsmError::ParallelFailureReplayMismatch { row: failed_row }),
         }
     }
 
@@ -1250,6 +1251,88 @@ mod tests {
             assert_eq!(parallel, serial);
             assert_eq!(serial.len(), strikes.len());
         }
+    }
+
+    #[test]
+    fn indexed_group_scheduler_completes_at_project_scale_group_count() {
+        const GROUPS: usize = 74_215;
+        let group_offsets = (0..=GROUPS)
+            .map(|group| u32::try_from(group).unwrap())
+            .collect::<Vec<_>>();
+        let spots = vec![100.0; GROUPS];
+        let strikes = vec![100.0; GROUPS];
+        let maturities = vec![1.0; GROUPS];
+        let rates = vec![0.05; GROUPS];
+        let volatilities = vec![0.25; GROUPS];
+        let yields = vec![0.02; GROUPS];
+        let light_regression = PolynomialRegressionSpec::try_new(
+            PolynomialDegree::try_new(1).unwrap(),
+            1.0e-12,
+            1.0e8,
+        )
+        .unwrap();
+        let light_method = BatchLsmCallMethod::try_new(
+            super::super::UniformExerciseMesh::try_new(1, OriginExercise::Excluded).unwrap(),
+            2,
+            2,
+            light_regression,
+            ExerciseTieRule::StrictlyGreater,
+            super::super::BatchRandomStreams::new(17, 19, 0, 1_000_000),
+        )
+        .unwrap();
+
+        let result = valid_grouped_continuous_inputs(
+            &group_offsets,
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        )
+        .price(light_method, &CpuExecutor::try_new(4).unwrap())
+        .unwrap();
+
+        assert_eq!(result.len(), GROUPS);
+        assert!(
+            result
+                .as_slice()
+                .iter()
+                .all(|row| row.early_exercise_paths() == 0 && row.expiry_paths() == 2)
+        );
+    }
+
+    #[test]
+    fn grouped_parallel_failure_replays_the_lowest_contract_row() {
+        let group_offsets = [0, 2, 4, 6];
+        let spots = [100.0; 3];
+        let strikes = [95.0, 105.0].repeat(3);
+        let maturities = [1.0; 3];
+        let rates = [0.05, 10_000.0, 10_000.0];
+        let volatilities = [0.25; 3];
+        let yields = [0.02; 3];
+        let inputs = valid_grouped_continuous_inputs(
+            &group_offsets,
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        );
+        let pricing_method = method(OriginExercise::Excluded);
+        let serial_error = inputs
+            .price(pricing_method, &CpuExecutor::try_new(1).unwrap())
+            .unwrap_err();
+        let parallel_error = inputs
+            .price(pricing_method, &CpuExecutor::try_new(4).unwrap())
+            .unwrap_err();
+
+        assert_eq!(parallel_error, serial_error);
+        assert!(matches!(
+            parallel_error,
+            BatchLsmError::FinancialInputAtRow { row: 2, .. }
+        ));
     }
 
     #[test]
