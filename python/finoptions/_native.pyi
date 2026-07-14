@@ -20,6 +20,19 @@ type NativeExerciseDiagnostic = tuple[
     float | None,
     float | None,
 ]
+type NativeBatchLsmResult = tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.bool_],
+    npt.NDArray[np.bool_],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
+]
 
 class CpuExecutor:
     def __init__(self, threads: int) -> None: ...
@@ -142,3 +155,48 @@ def price_lsm_call_seeded_f64(
     list[int],
     list[NativeExerciseDiagnostic],
 ]: ...
+def price_lsm_call_batch_continuous_yield_f64(
+    initial_spots: npt.NDArray[np.float64],
+    strikes: npt.NDArray[np.float64],
+    maturities: npt.NDArray[np.float64],
+    constant_continuously_compounded_rates: npt.NDArray[np.float64],
+    constant_volatilities: npt.NDArray[np.float64],
+    annualized_dividend_yields: npt.NDArray[np.float64],
+    base_intervals: int,
+    origin_exercise: str,
+    executor: CpuExecutor,
+    training_paths: int,
+    evaluation_paths: int,
+    training_seed: int,
+    training_domain_start: int,
+    evaluation_seed: int,
+    evaluation_domain_start: int,
+    polynomial_degree: int,
+    rank_tolerance: float,
+    condition_limit: float,
+    tie_rule: str,
+) -> NativeBatchLsmResult: ...
+def price_lsm_call_batch_cash_dividends_f64(
+    initial_spots: npt.NDArray[np.float64],
+    strikes: npt.NDArray[np.float64],
+    maturities: npt.NDArray[np.float64],
+    constant_continuously_compounded_rates: npt.NDArray[np.float64],
+    constant_volatilities: npt.NDArray[np.float64],
+    dividend_offsets: npt.NDArray[np.int64],
+    dividend_times: npt.NDArray[np.float64],
+    dividend_amounts: npt.NDArray[np.float64],
+    dividend_policy: str,
+    base_intervals: int,
+    origin_exercise: str,
+    executor: CpuExecutor,
+    training_paths: int,
+    evaluation_paths: int,
+    training_seed: int,
+    training_domain_start: int,
+    evaluation_seed: int,
+    evaluation_domain_start: int,
+    polynomial_degree: int,
+    rank_tolerance: float,
+    condition_limit: float,
+    tie_rule: str,
+) -> NativeBatchLsmResult: ...

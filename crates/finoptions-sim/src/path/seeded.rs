@@ -8,6 +8,10 @@ use super::{GbmPathPlan, SimulatedPaths};
 use crate::random::{NormalError, PhiloxPathStream, sample_standard_normal};
 use crate::{RandomStream, SimulationError};
 
+// Keeps contract-parallel worker scratch cache-sized and independent of batch rows. Blocking only
+// changes transpose storage: random addresses and arithmetic within every path remain identical.
+const SERIAL_PATH_BLOCK: usize = 32;
+
 impl GbmPathPlan {
     /// Generates standard-normal variates and evolves paths without a dense shock matrix.
     ///
@@ -26,14 +30,31 @@ impl GbmPathPlan {
         stream: RandomStream,
     ) -> Result<SimulatedPaths, SimulationError> {
         let (normal_budget, output_values) = self.validate_seeded(initial_spot, paths)?;
-        let mut path_major = vec![0.0; output_values];
-        for (path, observations) in path_major
-            .chunks_mut(self.observation_nodes.len())
-            .enumerate()
-        {
-            self.simulate_one_seeded(initial_spot, path, normal_budget, stream, observations)?;
+        let observations = self.observation_nodes.len();
+        let block_capacity = paths.min(SERIAL_PATH_BLOCK);
+        let mut block = vec![0.0; observations * block_capacity];
+        let mut values = vec![0.0; output_values];
+        for block_start in (0..paths).step_by(SERIAL_PATH_BLOCK) {
+            let block_paths = (paths - block_start).min(SERIAL_PATH_BLOCK);
+            let block_values = &mut block[..observations * block_paths];
+            for (local_path, path_observations) in block_values.chunks_mut(observations).enumerate()
+            {
+                self.simulate_one_seeded(
+                    initial_spot,
+                    block_start + local_path,
+                    normal_budget,
+                    stream,
+                    path_observations,
+                )?;
+            }
+            for observation in 0..observations {
+                let output_start = observation * paths + block_start;
+                let output_row = &mut values[output_start..output_start + block_paths];
+                for (local_path, output) in output_row.iter_mut().enumerate() {
+                    *output = block_values[local_path * observations + observation];
+                }
+            }
         }
-        let values = self.transpose_seeded(&path_major, paths, false);
         Ok(SimulatedPaths {
             plan: self.clone(),
             random_stream: Some(stream),
@@ -84,7 +105,7 @@ impl GbmPathPlan {
             };
         }
 
-        let values = self.transpose_seeded(&path_major, paths, true);
+        let values = self.transpose_seeded_parallel(&path_major, paths);
         Ok(SimulatedPaths {
             plan: self.clone(),
             random_stream: Some(stream),
@@ -166,7 +187,7 @@ impl GbmPathPlan {
         Ok(())
     }
 
-    fn transpose_seeded(&self, path_major: &[f64], paths: usize, parallel: bool) -> Vec<f64> {
+    fn transpose_seeded_parallel(&self, path_major: &[f64], paths: usize) -> Vec<f64> {
         let observations = self.observation_nodes.len();
         let mut time_major = vec![0.0; path_major.len()];
         let transpose_row = |observation: usize, row: &mut [f64]| {
@@ -174,17 +195,10 @@ impl GbmPathPlan {
                 *value = path_major[path * observations + observation];
             });
         };
-        if parallel {
-            time_major
-                .par_chunks_mut(paths)
-                .enumerate()
-                .for_each(|(observation, row)| transpose_row(observation, row));
-        } else {
-            time_major
-                .chunks_mut(paths)
-                .enumerate()
-                .for_each(|(observation, row)| transpose_row(observation, row));
-        }
+        time_major
+            .par_chunks_mut(paths)
+            .enumerate()
+            .for_each(|(observation, row)| transpose_row(observation, row));
         time_major
     }
 }

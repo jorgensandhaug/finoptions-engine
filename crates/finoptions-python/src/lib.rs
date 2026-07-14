@@ -12,10 +12,14 @@ use finoptions_core::{
     InputError as CoreInputError, LogDiscountCurve, TimeGrid,
 };
 use finoptions_lsm::{
+    BatchDividendModel as CoreBatchDividendModel, BatchLsmCallInputs as CoreBatchLsmCallInputs,
+    BatchLsmCallMethod as CoreBatchLsmCallMethod, BatchLsmCallResult as CoreBatchLsmCallResult,
+    BatchLsmError as CoreBatchLsmError, BatchRandomStreams as CoreBatchRandomStreams,
     ExerciseFitDiagnostics as CoreExerciseFitDiagnostics, ExerciseTieRule as CoreExerciseTieRule,
     LsmCallEstimator as CoreLsmCallEstimator, LsmError as CoreLsmError, LsmRun as CoreLsmRun,
-    PolynomialDegree as CorePolynomialDegree,
+    OriginExercise as CoreOriginExercise, PolynomialDegree as CorePolynomialDegree,
     PolynomialRegressionSpec as CorePolynomialRegressionSpec,
+    UniformExerciseMesh as CoreUniformExerciseMesh,
 };
 use finoptions_runtime::{CpuExecutor as CoreCpuExecutor, ExecutionError as CoreExecutionError};
 use finoptions_sim::{
@@ -81,6 +85,20 @@ impl IntoPyBatchError for CoreBatchError {
     }
 }
 
+trait IntoPyBatchLsmDividendError {
+    fn into_py_batch_lsm_dividend_error(self) -> PyErr;
+}
+
+impl IntoPyBatchLsmDividendError for CoreBatchError {
+    fn into_py_batch_lsm_dividend_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreBatchError::ParallelFailureReplayMismatch { .. } => LsmError::new_err(message),
+            _ => InputError::new_err(message),
+        }
+    }
+}
+
 trait IntoPyInputError {
     fn into_py_input_error(self) -> PyErr;
 }
@@ -118,6 +136,32 @@ trait IntoPyLsmError {
 impl IntoPyLsmError for CoreLsmError {
     fn into_py_lsm_error(self) -> PyErr {
         LsmError::new_err(self.to_string())
+    }
+}
+
+trait IntoPyBatchLsmError {
+    fn into_py_batch_lsm_error(self) -> PyErr;
+}
+
+impl IntoPyBatchLsmError for CoreBatchLsmError {
+    fn into_py_batch_lsm_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreBatchLsmError::EmptyBatch
+            | CoreBatchLsmError::RowCountMismatch { .. }
+            | CoreBatchLsmError::InvalidRowValue { .. }
+            | CoreBatchLsmError::EmptyBaseIntervals
+            | CoreBatchLsmError::InsufficientEvaluationPaths { .. }
+            | CoreBatchLsmError::PathCountOutsideDomain { .. }
+            | CoreBatchLsmError::RandomDomainRangeOverflow { .. }
+            | CoreBatchLsmError::RandomDomainRangeCollision { .. }
+            | CoreBatchLsmError::CashDividendOutsideContract { .. }
+            | CoreBatchLsmError::DuplicateCashDividendTime { .. }
+            | CoreBatchLsmError::ContractMeshShapeOverflow { .. }
+            | CoreBatchLsmError::FinancialInputAtRow { .. }
+            | CoreBatchLsmError::SimulationPlanAtRow { .. } => InputError::new_err(message),
+            _ => LsmError::new_err(message),
+        }
     }
 }
 
@@ -218,6 +262,36 @@ fn parse_cash_amount_scale<'a>(
         )),
         _ => Err(BatchError::new_err(format!(
             "unsupported cash-amount scale {value:?}"
+        ))),
+    }
+}
+
+fn parse_dividend_policy(value: &str) -> PyResult<DividendPolicy> {
+    match value {
+        "liquidator" => Ok(DividendPolicy::Liquidator),
+        "survivor" => Ok(DividendPolicy::Survivor),
+        observed => Err(InputError::new_err(format!(
+            "unsupported dividend policy {observed:?}"
+        ))),
+    }
+}
+
+fn parse_exercise_tie_rule(value: &str) -> PyResult<CoreExerciseTieRule> {
+    match value {
+        "strictly_greater" => Ok(CoreExerciseTieRule::StrictlyGreater),
+        "greater_or_equal" => Ok(CoreExerciseTieRule::GreaterOrEqual),
+        observed => Err(InputError::new_err(format!(
+            "unsupported exercise tie rule {observed:?}"
+        ))),
+    }
+}
+
+fn parse_origin_exercise(value: &str) -> PyResult<CoreOriginExercise> {
+    match value {
+        "excluded" => Ok(CoreOriginExercise::Excluded),
+        "included" => Ok(CoreOriginExercise::Included),
+        observed => Err(InputError::new_err(format!(
+            "unsupported origin exercise convention {observed:?}"
         ))),
     }
 }
@@ -440,15 +514,7 @@ fn parse_gbm_model(
             .map_err(CoreInputError::into_py_input_error)?;
     let volatility = ConstantVolatility::try_new(annualized_volatility)
         .map_err(CoreInputError::into_py_input_error)?;
-    let policy = match dividend_policy {
-        "liquidator" => DividendPolicy::Liquidator,
-        "survivor" => DividendPolicy::Survivor,
-        observed => {
-            return Err(InputError::new_err(format!(
-                "unsupported dividend policy {observed:?}"
-            )));
-        }
-    };
+    let policy = parse_dividend_policy(dividend_policy)?;
     let plan = GbmPathPlan::try_new(&schedule, &curve, &dividend_yield_curve, volatility, policy)
         .map_err(CoreSimulationError::into_py_simulation_error)?;
     Ok((plan, curve))
@@ -697,15 +763,7 @@ fn price_lsm_call_seeded_f64<'py>(
         .map_err(|error| LsmError::new_err(error.to_string()))?;
     let regression = CorePolynomialRegressionSpec::try_new(degree, rank_tolerance, condition_limit)
         .map_err(|error| LsmError::new_err(error.to_string()))?;
-    let tie_rule = match tie_rule {
-        "strictly_greater" => CoreExerciseTieRule::StrictlyGreater,
-        "greater_or_equal" => CoreExerciseTieRule::GreaterOrEqual,
-        observed => {
-            return Err(InputError::new_err(format!(
-                "unsupported exercise tie rule {observed:?}"
-            )));
-        }
-    };
+    let tie_rule = parse_exercise_tie_rule(tie_rule)?;
     let estimator = CoreLsmCallEstimator::try_new(strike, regression, tie_rule)
         .map_err(CoreLsmError::into_py_lsm_error)?;
     let training_stream = CoreRandomStream::new(training_seed, training_domain);
@@ -728,6 +786,310 @@ fn price_lsm_call_seeded_f64<'py>(
     Ok(native_lsm_result(run))
 }
 
+#[derive(Clone, Copy)]
+struct NativeBatchColumns<'a> {
+    initial_spots: &'a [f64],
+    strikes: &'a [f64],
+    maturities: &'a [f64],
+    constant_continuously_compounded_rates: &'a [f64],
+    constant_volatilities: &'a [f64],
+}
+
+impl NativeBatchColumns<'_> {
+    fn price(
+        self,
+        dividends: CoreBatchDividendModel<'_>,
+        method: CoreBatchLsmCallMethod,
+        executor: &CoreCpuExecutor,
+    ) -> Result<CoreBatchLsmCallResult, CoreBatchLsmError> {
+        CoreBatchLsmCallInputs::try_new(
+            self.initial_spots,
+            self.strikes,
+            self.maturities,
+            self.constant_continuously_compounded_rates,
+            self.constant_volatilities,
+            dividends,
+        )?
+        .price(method, executor)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_batch_lsm_method(
+    base_intervals: u32,
+    origin_exercise: &str,
+    training_paths: usize,
+    evaluation_paths: usize,
+    training_seed: u64,
+    training_domain_start: u32,
+    evaluation_seed: u64,
+    evaluation_domain_start: u32,
+    polynomial_degree: usize,
+    rank_tolerance: f64,
+    condition_limit: f64,
+    tie_rule: &str,
+) -> PyResult<CoreBatchLsmCallMethod> {
+    let mesh =
+        CoreUniformExerciseMesh::try_new(base_intervals, parse_origin_exercise(origin_exercise)?)
+            .map_err(CoreBatchLsmError::into_py_batch_lsm_error)?;
+    let degree = CorePolynomialDegree::try_new(polynomial_degree)
+        .map_err(|error| LsmError::new_err(error.to_string()))?;
+    let regression = CorePolynomialRegressionSpec::try_new(degree, rank_tolerance, condition_limit)
+        .map_err(|error| LsmError::new_err(error.to_string()))?;
+    CoreBatchLsmCallMethod::try_new(
+        mesh,
+        training_paths,
+        evaluation_paths,
+        regression,
+        parse_exercise_tie_rule(tie_rule)?,
+        CoreBatchRandomStreams::new(
+            training_seed,
+            evaluation_seed,
+            training_domain_start,
+            evaluation_domain_start,
+        ),
+    )
+    .map_err(CoreBatchLsmError::into_py_batch_lsm_error)
+}
+
+type NativeBatchLsmResult<'py> = (
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray1<u32>>,
+    Bound<'py, PyArray1<u32>>,
+    Bound<'py, PyArray1<u32>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<u32>>,
+    Bound<'py, PyArray1<u32>>,
+);
+
+fn reserve_batch_output<T>(values: &mut Vec<T>, rows: usize, field: &'static str) -> PyResult<()> {
+    values.try_reserve_exact(rows).map_err(|_| {
+        LsmError::new_err(format!(
+            "could not allocate native batched LSM output {field} for {rows} rows"
+        ))
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn native_batch_lsm_result(
+    py: Python<'_>,
+    result: CoreBatchLsmCallResult,
+) -> PyResult<NativeBatchLsmResult<'_>> {
+    let rows = result.len();
+    let mut prices = Vec::new();
+    let mut sample_standard_deviations = Vec::new();
+    let mut standard_errors = Vec::new();
+    let mut origin_decisions_fitted = Vec::new();
+    let mut origin_exercised = Vec::new();
+    let mut regression_nodes = Vec::new();
+    let mut no_training_support_nodes = Vec::new();
+    let mut minimum_in_the_money_training_paths = Vec::new();
+    let mut maximum_regression_condition_numbers = Vec::new();
+    let mut early_exercise_paths = Vec::new();
+    let mut expiry_paths = Vec::new();
+    reserve_batch_output(&mut prices, rows, "prices")?;
+    reserve_batch_output(
+        &mut sample_standard_deviations,
+        rows,
+        "sample_standard_deviations",
+    )?;
+    reserve_batch_output(&mut standard_errors, rows, "standard_errors")?;
+    reserve_batch_output(
+        &mut origin_decisions_fitted,
+        rows,
+        "origin_decisions_fitted",
+    )?;
+    reserve_batch_output(&mut origin_exercised, rows, "origin_exercised")?;
+    reserve_batch_output(&mut regression_nodes, rows, "regression_nodes")?;
+    reserve_batch_output(
+        &mut no_training_support_nodes,
+        rows,
+        "no_training_support_nodes",
+    )?;
+    reserve_batch_output(
+        &mut minimum_in_the_money_training_paths,
+        rows,
+        "minimum_in_the_money_training_paths",
+    )?;
+    reserve_batch_output(
+        &mut maximum_regression_condition_numbers,
+        rows,
+        "maximum_regression_condition_numbers",
+    )?;
+    reserve_batch_output(&mut early_exercise_paths, rows, "early_exercise_paths")?;
+    reserve_batch_output(&mut expiry_paths, rows, "expiry_paths")?;
+
+    for row in result.into_rows() {
+        prices.push(row.price());
+        sample_standard_deviations.push(row.sample_standard_deviation());
+        standard_errors.push(row.standard_error());
+        origin_decisions_fitted.push(row.origin_decision_fitted());
+        origin_exercised.push(row.origin_exercised());
+        regression_nodes.push(row.regression_nodes());
+        no_training_support_nodes.push(row.no_training_support_nodes());
+        minimum_in_the_money_training_paths.push(row.minimum_in_the_money_training_paths());
+        maximum_regression_condition_numbers.push(row.maximum_regression_condition_number());
+        early_exercise_paths.push(row.early_exercise_paths());
+        expiry_paths.push(row.expiry_paths());
+    }
+
+    Ok((
+        prices.into_pyarray(py),
+        sample_standard_deviations.into_pyarray(py),
+        standard_errors.into_pyarray(py),
+        origin_decisions_fitted.into_pyarray(py),
+        origin_exercised.into_pyarray(py),
+        regression_nodes.into_pyarray(py),
+        no_training_support_nodes.into_pyarray(py),
+        minimum_in_the_money_training_paths.into_pyarray(py),
+        maximum_regression_condition_numbers.into_pyarray(py),
+        early_exercise_paths.into_pyarray(py),
+        expiry_paths.into_pyarray(py),
+    ))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn price_lsm_call_batch_continuous_yield_f64<'py>(
+    py: Python<'py>,
+    initial_spots: PyReadonlyArray1<'py, f64>,
+    strikes: PyReadonlyArray1<'py, f64>,
+    maturities: PyReadonlyArray1<'py, f64>,
+    constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
+    constant_volatilities: PyReadonlyArray1<'py, f64>,
+    annualized_dividend_yields: PyReadonlyArray1<'py, f64>,
+    base_intervals: u32,
+    origin_exercise: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    training_paths: usize,
+    evaluation_paths: usize,
+    training_seed: u64,
+    training_domain_start: u32,
+    evaluation_seed: u64,
+    evaluation_domain_start: u32,
+    polynomial_degree: usize,
+    rank_tolerance: f64,
+    condition_limit: f64,
+    tie_rule: &str,
+) -> PyResult<NativeBatchLsmResult<'py>> {
+    let columns = NativeBatchColumns {
+        initial_spots: initial_spots.as_slice()?,
+        strikes: strikes.as_slice()?,
+        maturities: maturities.as_slice()?,
+        constant_continuously_compounded_rates: constant_continuously_compounded_rates
+            .as_slice()?,
+        constant_volatilities: constant_volatilities.as_slice()?,
+    };
+    let annualized_dividend_yields = annualized_dividend_yields.as_slice()?;
+    let method = parse_batch_lsm_method(
+        base_intervals,
+        origin_exercise,
+        training_paths,
+        evaluation_paths,
+        training_seed,
+        training_domain_start,
+        evaluation_seed,
+        evaluation_domain_start,
+        polynomial_degree,
+        rank_tolerance,
+        condition_limit,
+        tie_rule,
+    )?;
+    let core_executor = &executor.inner;
+    let result = py
+        .detach(move || {
+            columns.price(
+                CoreBatchDividendModel::ContinuousYield {
+                    annualized_decimals: annualized_dividend_yields,
+                },
+                method,
+                core_executor,
+            )
+        })
+        .map_err(CoreBatchLsmError::into_py_batch_lsm_error)?;
+    native_batch_lsm_result(py, result)
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn price_lsm_call_batch_cash_dividends_f64<'py>(
+    py: Python<'py>,
+    initial_spots: PyReadonlyArray1<'py, f64>,
+    strikes: PyReadonlyArray1<'py, f64>,
+    maturities: PyReadonlyArray1<'py, f64>,
+    constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
+    constant_volatilities: PyReadonlyArray1<'py, f64>,
+    dividend_offsets: PyReadonlyArray1<'py, i64>,
+    dividend_times: PyReadonlyArray1<'py, f64>,
+    dividend_amounts: PyReadonlyArray1<'py, f64>,
+    dividend_policy: &str,
+    base_intervals: u32,
+    origin_exercise: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    training_paths: usize,
+    evaluation_paths: usize,
+    training_seed: u64,
+    training_domain_start: u32,
+    evaluation_seed: u64,
+    evaluation_domain_start: u32,
+    polynomial_degree: usize,
+    rank_tolerance: f64,
+    condition_limit: f64,
+    tie_rule: &str,
+) -> PyResult<NativeBatchLsmResult<'py>> {
+    let columns = NativeBatchColumns {
+        initial_spots: initial_spots.as_slice()?,
+        strikes: strikes.as_slice()?,
+        maturities: maturities.as_slice()?,
+        constant_continuously_compounded_rates: constant_continuously_compounded_rates
+            .as_slice()?,
+        constant_volatilities: constant_volatilities.as_slice()?,
+    };
+    let dividend_offsets = dividend_offsets.as_slice()?;
+    let dividend_times = dividend_times.as_slice()?;
+    let dividend_amounts = dividend_amounts.as_slice()?;
+    let dividend_policy = parse_dividend_policy(dividend_policy)?;
+    let method = parse_batch_lsm_method(
+        base_intervals,
+        origin_exercise,
+        training_paths,
+        evaluation_paths,
+        training_seed,
+        training_domain_start,
+        evaluation_seed,
+        evaluation_domain_start,
+        polynomial_degree,
+        rank_tolerance,
+        condition_limit,
+        tie_rule,
+    )?;
+    let core_executor = &executor.inner;
+    let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
+        let schedules = RaggedCashDividends::try_new_with_executor(
+            dividend_offsets,
+            dividend_times,
+            dividend_amounts,
+            core_executor,
+        )
+        .map_err(CoreBatchError::into_py_batch_lsm_dividend_error)?;
+        columns
+            .price(
+                CoreBatchDividendModel::CashDividends {
+                    schedules,
+                    policy: dividend_policy,
+                },
+                method,
+                core_executor,
+            )
+            .map_err(CoreBatchLsmError::into_py_batch_lsm_error)
+    })?;
+    native_batch_lsm_result(py, result)
+}
+
 /// Private native module.
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -743,6 +1105,14 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        price_lsm_call_batch_continuous_yield_f64,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        price_lsm_call_batch_cash_dividends_f64,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;
     module.add_function(wrap_pyfunction!(validate_constant_volatility, module)?)?;
     module.add_function(wrap_pyfunction!(

@@ -1,0 +1,336 @@
+"""Contract-parallel LSM calls over strict contiguous financial columns."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Final, cast
+
+import numpy as np
+import numpy.typing as npt
+
+from . import _native
+from .dividends import RaggedCashDividends
+from .lsm import Lsm, LsmError
+from .model import DividendPolicy, InputError
+from .simulation import CpuExecutor
+
+Float64Vector = npt.NDArray[np.float64]
+UInt32Vector = npt.NDArray[np.uint32]
+BoolVector = npt.NDArray[np.bool_]
+
+_MAX_U32: Final = (2**32) - 1
+_MIN_EVALUATION_PATHS: Final = 2
+_VECTOR_DIMENSIONS: Final = 1
+
+
+def _validate_vector(value: object, *, field: str, dtype: str) -> None:
+    if type(value) is not np.ndarray:
+        msg = f"{field} must be a plain numpy.ndarray"
+        raise InputError(msg)
+    array = cast("npt.NDArray[np.generic]", value)
+    expected = np.dtype(dtype)
+    if array.dtype != expected:
+        msg = f"{field} must have dtype {expected}; observed {array.dtype}"
+        raise InputError(msg)
+    if array.ndim != _VECTOR_DIMENSIONS:
+        msg = f"{field} must be one-dimensional; observed shape {array.shape}"
+        raise InputError(msg)
+    if not array.flags.c_contiguous:
+        msg = f"{field} must be C-contiguous; implicit copies are forbidden"
+        raise InputError(msg)
+
+
+class OriginExercise(StrEnum):
+    """Whether valuation origin is an explicit common exercise decision."""
+
+    EXCLUDED = "excluded"
+    INCLUDED = "included"
+
+
+@dataclass(frozen=True, slots=True)
+class UniformExerciseMesh:
+    """Uniform Bermudan base mesh augmented by every exact cash-event time."""
+
+    base_intervals: int
+    origin_exercise: OriginExercise
+
+    def __post_init__(self) -> None:
+        """Reject empty, inferred, or unrepresentable meshes and implicit origin semantics."""
+        if type(self.base_intervals) is not int or not 1 <= self.base_intervals <= _MAX_U32:
+            msg = (
+                f"base_intervals must be a plain int in [1, {_MAX_U32}]; "
+                f"observed {self.base_intervals!r}"
+            )
+            raise InputError(msg)
+        if type(self.origin_exercise) is not OriginExercise:
+            msg = "origin_exercise must be OriginExercise"
+            raise InputError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousDividendYieldBatch:
+    """One constant nonnegative annualized proportional yield per option row."""
+
+    annualized_decimals: Float64Vector
+
+    def __post_init__(self) -> None:
+        """Require one directly borrowable float64 vector; native pricing validates values."""
+        _validate_vector(
+            self.annualized_decimals,
+            field="annualized_decimals",
+            dtype="float64",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CashDividendBatch:
+    """Exact ragged cash schedules under one declared limited-liability jump policy."""
+
+    schedules: RaggedCashDividends
+    policy: DividendPolicy
+
+    def __post_init__(self) -> None:
+        """Reject duck-typed schedules and implicit cash-jump conventions."""
+        if type(self.schedules) is not RaggedCashDividends:
+            msg = "schedules must be RaggedCashDividends"
+            raise InputError(msg)
+        if type(self.policy) is not DividendPolicy:
+            msg = "policy must be DividendPolicy"
+            raise InputError(msg)
+
+
+type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class LsmBatchResult:
+    """Immutable row-ordered prices, sampling error, policy support, and stopping counts."""
+
+    prices: Float64Vector
+    sample_standard_deviations: Float64Vector
+    standard_errors: Float64Vector
+    origin_decisions_fitted: BoolVector
+    origin_exercised: BoolVector
+    regression_nodes: UInt32Vector
+    no_training_support_nodes: UInt32Vector
+    minimum_in_the_money_training_paths: UInt32Vector
+    maximum_regression_condition_numbers: Float64Vector
+    early_exercise_paths: UInt32Vector
+    expiry_paths: UInt32Vector
+
+    def __post_init__(self) -> None:
+        """Reject manually assembled outputs outside the native immutable column contract."""
+        fields = (
+            ("prices", self.prices, "float64"),
+            ("sample_standard_deviations", self.sample_standard_deviations, "float64"),
+            ("standard_errors", self.standard_errors, "float64"),
+            ("origin_decisions_fitted", self.origin_decisions_fitted, "bool"),
+            ("origin_exercised", self.origin_exercised, "bool"),
+            ("regression_nodes", self.regression_nodes, "uint32"),
+            ("no_training_support_nodes", self.no_training_support_nodes, "uint32"),
+            (
+                "minimum_in_the_money_training_paths",
+                self.minimum_in_the_money_training_paths,
+                "uint32",
+            ),
+            (
+                "maximum_regression_condition_numbers",
+                self.maximum_regression_condition_numbers,
+                "float64",
+            ),
+            ("early_exercise_paths", self.early_exercise_paths, "uint32"),
+            ("expiry_paths", self.expiry_paths, "uint32"),
+        )
+        rows = int(self.prices.size)
+        for field, values, dtype in fields:
+            _validate_vector(values, field=field, dtype=dtype)
+            if values.size != rows:
+                msg = f"{field} has {values.size} rows; expected {rows}"
+                raise InputError(msg)
+            if values.flags.writeable:
+                msg = f"{field} must be immutable"
+                raise InputError(msg)
+
+    @property
+    def rows(self) -> int:
+        """Return the exact priced contract count."""
+        return int(self.prices.size)
+
+
+def _validate_request(  # noqa: PLR0913 - each financial column is independently typed
+    *,
+    initial_spots: Float64Vector,
+    strikes: Float64Vector,
+    maturities: Float64Vector,
+    rates: Float64Vector,
+    volatilities: Float64Vector,
+    dividends: BatchDividends,
+    mesh: UniformExerciseMesh,
+    executor: CpuExecutor,
+    method: Lsm,
+) -> None:
+    for field, values in (
+        ("initial_spots", initial_spots),
+        ("strikes", strikes),
+        ("maturities", maturities),
+        ("rates", rates),
+        ("volatilities", volatilities),
+    ):
+        _validate_vector(values, field=field, dtype="float64")
+    if type(dividends) not in (ContinuousDividendYieldBatch, CashDividendBatch):
+        msg = "dividends must be ContinuousDividendYieldBatch or CashDividendBatch"
+        raise InputError(msg)
+    if type(mesh) is not UniformExerciseMesh:
+        msg = "mesh must be UniformExerciseMesh"
+        raise InputError(msg)
+    if type(executor) is not CpuExecutor:
+        msg = "executor must be CpuExecutor"
+        raise InputError(msg)
+    if type(method) is not Lsm:
+        msg = "method must be Lsm"
+        raise InputError(msg)
+    if method.evaluation_paths < _MIN_EVALUATION_PATHS:
+        msg = "batched LSM requires at least two independent evaluation paths"
+        raise InputError(msg)
+
+
+def _freeze_native_result(raw: _native.NativeBatchLsmResult) -> LsmBatchResult:
+    (
+        prices,
+        sample_standard_deviations,
+        standard_errors,
+        origin_decisions_fitted,
+        origin_exercised,
+        regression_nodes,
+        no_training_support_nodes,
+        minimum_in_the_money_training_paths,
+        maximum_regression_condition_numbers,
+        early_exercise_paths,
+        expiry_paths,
+    ) = raw
+    prices.flags.writeable = False
+    sample_standard_deviations.flags.writeable = False
+    standard_errors.flags.writeable = False
+    origin_decisions_fitted.flags.writeable = False
+    origin_exercised.flags.writeable = False
+    regression_nodes.flags.writeable = False
+    no_training_support_nodes.flags.writeable = False
+    minimum_in_the_money_training_paths.flags.writeable = False
+    maximum_regression_condition_numbers.flags.writeable = False
+    early_exercise_paths.flags.writeable = False
+    expiry_paths.flags.writeable = False
+    return LsmBatchResult(
+        prices=prices,
+        sample_standard_deviations=sample_standard_deviations,
+        standard_errors=standard_errors,
+        origin_decisions_fitted=origin_decisions_fitted,
+        origin_exercised=origin_exercised,
+        regression_nodes=regression_nodes,
+        no_training_support_nodes=no_training_support_nodes,
+        minimum_in_the_money_training_paths=minimum_in_the_money_training_paths,
+        maximum_regression_condition_numbers=maximum_regression_condition_numbers,
+        early_exercise_paths=early_exercise_paths,
+        expiry_paths=expiry_paths,
+    )
+
+
+def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independently typed
+    *,
+    initial_spots: Float64Vector,
+    strikes: Float64Vector,
+    maturities: Float64Vector,
+    rates: Float64Vector,
+    volatilities: Float64Vector,
+    dividends: BatchDividends,
+    mesh: UniformExerciseMesh,
+    executor: CpuExecutor,
+    method: Lsm,
+) -> LsmBatchResult:
+    """Price constant-parameter Bermudan calls using native contract-parallel LSM.
+
+    `rates` are constant continuously compounded annual decimals. `volatilities` are positive
+    annual decimals. The uniform mesh is augmented by every exact cash-event time, and exercise is
+    observed before a same-time cash jump. Each row uses `method.training_stream.domain + row` and
+    `method.evaluation_stream.domain + row`; the native boundary rejects overflow or overlap.
+
+    Input arrays are borrowed without dtype, layout, or ownership conversion. Do not mutate them
+    concurrently with this synchronous call. Policy fitting and valuation use disjoint path
+    populations; no failed row returns a partial result or changes the requested method.
+
+    Raises:
+        InputError: If a runtime type, array layout, model value, mesh, or random interval is
+            invalid.
+        LsmError: If allocation, simulation, regression, policy support, or evaluation fails.
+
+    """
+    _validate_request(
+        initial_spots=initial_spots,
+        strikes=strikes,
+        maturities=maturities,
+        rates=rates,
+        volatilities=volatilities,
+        dividends=dividends,
+        mesh=mesh,
+        executor=executor,
+        method=method,
+    )
+    common = (
+        initial_spots,
+        strikes,
+        maturities,
+        rates,
+        volatilities,
+    )
+    method_arguments = (
+        mesh.base_intervals,
+        mesh.origin_exercise.value,
+        executor._handle,  # noqa: SLF001 - facade owns the private native resource
+        method.training_paths,
+        method.evaluation_paths,
+        method.training_stream.seed,
+        method.training_stream.domain,
+        method.evaluation_stream.seed,
+        method.evaluation_stream.domain,
+        method.polynomial_degree,
+        method.rank_tolerance,
+        method.condition_limit,
+        method.tie_rule.value,
+    )
+    if type(dividends) is ContinuousDividendYieldBatch:
+        raw = _native.price_lsm_call_batch_continuous_yield_f64(
+            *common,
+            dividends.annualized_decimals,
+            *method_arguments,
+        )
+    elif type(dividends) is CashDividendBatch:
+        raw = _native.price_lsm_call_batch_cash_dividends_f64(
+            *common,
+            dividends.schedules.offsets,
+            dividends.schedules.times,
+            dividends.schedules.amounts,
+            dividends.policy.value,
+            *method_arguments,
+        )
+    else:
+        msg = "dividends changed type after request validation"
+        raise LsmError(msg)
+    result = _freeze_native_result(raw)
+    stopping_paths = result.early_exercise_paths.astype(np.uint64) + result.expiry_paths.astype(
+        np.uint64
+    )
+    if np.any(stopping_paths != method.evaluation_paths):
+        msg = "native batched LSM stopping counts do not partition evaluation paths"
+        raise LsmError(msg)
+    return result
+
+
+__all__ = [
+    "BatchDividends",
+    "CashDividendBatch",
+    "ContinuousDividendYieldBatch",
+    "LsmBatchResult",
+    "OriginExercise",
+    "UniformExerciseMesh",
+    "price_lsm_call_batch",
+]

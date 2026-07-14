@@ -5,6 +5,15 @@ from __future__ import annotations
 from typing import Final, NamedTuple
 
 from . import _native
+from .batch_lsm import (
+    BatchDividends,
+    CashDividendBatch,
+    ContinuousDividendYieldBatch,
+    LsmBatchResult,
+    OriginExercise,
+    UniformExerciseMesh,
+    price_lsm_call_batch,
+)
 from .dividends import (
     BatchError,
     BinnedCashDividends,
@@ -63,12 +72,15 @@ def build_info() -> BuildInfo:
 
 __version__: Final = build_info().package_version
 __all__ = [
+    "BatchDividends",
     "BatchError",
     "BinnedCashDividends",
     "BuildInfo",
     "CashAmountScale",
     "CashDividend",
+    "CashDividendBatch",
     "ConstantVolatility",
+    "ContinuousDividendYieldBatch",
     "CpuExecutor",
     "CumulativeDividendYieldCurve",
     "DividendBinSpec",
@@ -81,11 +93,13 @@ __all__ = [
     "InputError",
     "LogDiscountCurve",
     "Lsm",
+    "LsmBatchResult",
     "LsmError",
     "LsmResult",
     "MaturityBoundary",
     "NoInTheMoneyPathsDiagnostics",
     "OriginDecisionDiagnostics",
+    "OriginExercise",
     "PaddedCashDividends",
     "PaddedSequenceSpec",
     "RaggedCashDividends",
@@ -93,11 +107,13 @@ __all__ = [
     "RegressionFitDiagnostics",
     "SimulationError",
     "TimeBinClosure",
+    "UniformExerciseMesh",
     "__version__",
     "bin_cash_dividends",
     "build_info",
     "pack_padded_cash_dividends",
     "price_lsm_call",
+    "price_lsm_call_batch",
     "simulate_gbm",
     "simulate_gbm_seeded",
 ]

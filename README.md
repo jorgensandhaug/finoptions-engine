@@ -145,5 +145,49 @@ result = price_lsm_call(
 regression diagnostic. Reused random domains, unsupported degree, deficient rank/support, excessive
 condition, or non-finite arithmetic raise without changing the estimator.
 
+For research tables, the same estimator prices strict contiguous columns with contract-level
+parallelism and no implicit dtype or layout conversion:
+
+```python
+import numpy as np
+
+from finoptions import (
+    ContinuousDividendYieldBatch,
+    OriginExercise,
+    UniformExerciseMesh,
+    price_lsm_call_batch,
+)
+
+batch_result = price_lsm_call_batch(
+    initial_spots=np.array([145.0, 155.0], dtype=np.float64),
+    strikes=np.array([100.0, 105.0], dtype=np.float64),
+    maturities=np.array([1.0, 1.0], dtype=np.float64),
+    rates=np.array([0.04, 0.05], dtype=np.float64),
+    volatilities=np.array([0.20, 0.25], dtype=np.float64),
+    dividends=ContinuousDividendYieldBatch(
+        annualized_decimals=np.array([0.02, 0.03], dtype=np.float64),
+    ),
+    mesh=UniformExerciseMesh(
+        base_intervals=150,
+        origin_exercise=OriginExercise.EXCLUDED,
+    ),
+    executor=CpuExecutor(threads=4),
+    method=Lsm(
+        training_paths=500,
+        evaluation_paths=500,
+        training_stream=RandomStream(seed=7, domain=0),
+        evaluation_stream=RandomStream(seed=11, domain=1_000_000),
+    ),
+)
+```
+
+Rows receive disjoint, addressable random domains. Exact cash schedules use the separate
+`CashDividendBatch` variant; no yield/cash conversion is inferred. Parallel and serial execution of
+an identical request are bitwise equivalent, while independent numerical methods are validated by
+financial identities, bounds, convergence, and justified tolerances rather than forced equality.
+
+The current project-shaped CPU and memory measurements are recorded as a reproducible
+[performance checkpoint](docs/performance/2026-07-14-lsm-batch.md).
+
 The repository is private, not yet licensed for redistribution, and no package publication is
 authorized.

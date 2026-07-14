@@ -13,10 +13,11 @@ fmt:
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
-    cargo test --workspace --all-targets
+    cargo test --workspace --all-features --lib --bins --tests --examples
+    cargo test --workspace --all-features --doc --exclude finoptions-python
     uv run --no-sync ruff format --check .
     uv run --no-sync ruff check .
-    uv run --no-sync ty check --error-on-warning python tests
+    uv run --no-sync ty check --error-on-warning python tests benchmarks
 
 test: native
     uv run --no-sync pytest -q

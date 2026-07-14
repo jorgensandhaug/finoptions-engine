@@ -14,8 +14,10 @@ bench-internals = []
 
 [dependencies]
 blake3.workspace = true
+finoptions-batch.workspace = true
 finoptions-core.workspace = true
 finoptions-sim.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -29,6 +31,10 @@ required-features = ["bench-internals"]
 
 [[bench]]
 name = "lsm_call"
+harness = false
+
+[[bench]]
+name = "lsm_batch"
 harness = false
 
 [lints]
