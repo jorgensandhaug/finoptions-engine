@@ -14,3 +14,4 @@ repository.
 - [ADR 0008: Ragged cash-dividend model tensors](0008-ragged-cash-dividend-tensors.md)
 - [ADR 0009: Explicit integrated continuous dividend yield](0009-explicit-continuous-dividend-yield.md)
 - [ADR 0010: Contract-parallel independent-policy LSM batches](0010-contract-parallel-lsm-batches.md)
+- [ADR 0011: Explicit escrowed cash-dividend approximation](0011-explicit-escrowed-cash-dividends.md)

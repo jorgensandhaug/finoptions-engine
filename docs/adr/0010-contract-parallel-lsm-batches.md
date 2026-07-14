@@ -23,7 +23,10 @@ strike, maturity, constant continuously compounded risk-free rate, and constant 
 request selects exactly one dividend representation:
 
 - a row-aligned constant nonnegative proportional-dividend yield; or
-- row-aligned ragged deterministic cash schedules under one explicit limited-liability jump policy.
+- row-aligned ragged deterministic cash schedules under one explicit limited-liability jump policy;
+  or
+- the separately named escrowed prepaid-forward approximation from
+  [ADR 0011](0011-explicit-escrowed-cash-dividends.md), with an explicit volatility convention.
 
 The exercise identity is a uniform Bermudan base mesh. Every cash-event year fraction is inserted
 exactly into its contract's mesh, exercise observes the pre-dividend state, and expiry remains the
@@ -67,8 +70,8 @@ embedding pricing as an opaque row-wise expression.
 - Contract batches are the primary CPU throughput unit; scalar pricing remains the audit and
   bespoke-model interface.
 - Worker count is an execution resource, not part of the financial or stochastic result identity.
-- Exact cash dividends and continuous proportional yields remain different request variants and
-  cannot be mixed or silently converted.
+- Exact cash dividends, escrowed cash dividends, and continuous proportional yields remain
+  different request variants and cannot be mixed or silently converted.
 - Failure is atomic at the request boundary. Continuing past invalid rows requires an explicit
   higher-level partitioning policy outside the engine.
 - The accepted slice does not yet include time-varying rate/volatility columns, puts, stochastic

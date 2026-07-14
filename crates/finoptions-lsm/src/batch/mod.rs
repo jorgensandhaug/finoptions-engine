@@ -6,7 +6,7 @@ mod pricing;
 
 pub use error::BatchLsmError;
 pub use input::{
-    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams, OriginExercise,
-    UniformExerciseMesh,
+    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams,
+    EscrowedVolatilityConvention, OriginExercise, UniformExerciseMesh,
 };
 pub use pricing::{BatchLsmCallResult, BatchLsmCallRowResult};

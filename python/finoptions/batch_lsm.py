@@ -48,6 +48,13 @@ class OriginExercise(StrEnum):
     INCLUDED = "included"
 
 
+class EscrowedVolatilityConvention(StrEnum):
+    """Meaning of the volatility vector for the escrowed prepaid-forward approximation."""
+
+    PREPAID_FORWARD = "prepaid_forward"
+    SPOT_MATCHED_AT_ORIGIN = "spot_matched_at_origin"
+
+
 @dataclass(frozen=True, slots=True)
 class UniformExerciseMesh:
     """Uniform Bermudan base mesh augmented by every exact cash-event time."""
@@ -100,7 +107,30 @@ class CashDividendBatch:
             raise InputError(msg)
 
 
-type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch
+@dataclass(frozen=True, slots=True)
+class EscrowedCashDividendBatch:
+    """Risky prepaid forward plus the deterministic value of later cash dividends.
+
+    This is an escrowed-dividend approximation, not the exact spot cash-jump model represented by
+    :class:`CashDividendBatch`. ``volatility_convention`` explicitly states whether the supplied
+    volatility vector belongs to the risky prepaid forward already or contains observed spot
+    volatilities that must be rescaled to match initial dollar volatility.
+    """
+
+    schedules: RaggedCashDividends
+    volatility_convention: EscrowedVolatilityConvention
+
+    def __post_init__(self) -> None:
+        """Reject duck-typed schedules and any implicit volatility interpretation."""
+        if type(self.schedules) is not RaggedCashDividends:
+            msg = "schedules must be RaggedCashDividends"
+            raise InputError(msg)
+        if type(self.volatility_convention) is not EscrowedVolatilityConvention:
+            msg = "volatility_convention must be EscrowedVolatilityConvention"
+            raise InputError(msg)
+
+
+type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch | EscrowedCashDividendBatch
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -178,8 +208,15 @@ def _validate_request(  # noqa: PLR0913 - each financial column is independently
         ("volatilities", volatilities),
     ):
         _validate_vector(values, field=field, dtype="float64")
-    if type(dividends) not in (ContinuousDividendYieldBatch, CashDividendBatch):
-        msg = "dividends must be ContinuousDividendYieldBatch or CashDividendBatch"
+    if type(dividends) not in (
+        ContinuousDividendYieldBatch,
+        CashDividendBatch,
+        EscrowedCashDividendBatch,
+    ):
+        msg = (
+            "dividends must be ContinuousDividendYieldBatch, CashDividendBatch, "
+            "or EscrowedCashDividendBatch"
+        )
         raise InputError(msg)
     if type(mesh) is not UniformExerciseMesh:
         msg = "mesh must be UniformExerciseMesh"
@@ -312,6 +349,15 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
             dividends.policy.value,
             *method_arguments,
         )
+    elif type(dividends) is EscrowedCashDividendBatch:
+        raw = _native.price_lsm_call_batch_escrowed_cash_dividends_f64(
+            *common,
+            dividends.schedules.offsets,
+            dividends.schedules.times,
+            dividends.schedules.amounts,
+            dividends.volatility_convention.value,
+            *method_arguments,
+        )
     else:
         msg = "dividends changed type after request validation"
         raise LsmError(msg)
@@ -329,6 +375,8 @@ __all__ = [
     "BatchDividends",
     "CashDividendBatch",
     "ContinuousDividendYieldBatch",
+    "EscrowedCashDividendBatch",
+    "EscrowedVolatilityConvention",
     "LsmBatchResult",
     "OriginExercise",
     "UniformExerciseMesh",

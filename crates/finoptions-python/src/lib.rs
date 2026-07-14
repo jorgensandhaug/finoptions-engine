@@ -15,6 +15,7 @@ use finoptions_lsm::{
     BatchDividendModel as CoreBatchDividendModel, BatchLsmCallInputs as CoreBatchLsmCallInputs,
     BatchLsmCallMethod as CoreBatchLsmCallMethod, BatchLsmCallResult as CoreBatchLsmCallResult,
     BatchLsmError as CoreBatchLsmError, BatchRandomStreams as CoreBatchRandomStreams,
+    EscrowedVolatilityConvention as CoreEscrowedVolatilityConvention,
     ExerciseFitDiagnostics as CoreExerciseFitDiagnostics, ExerciseTieRule as CoreExerciseTieRule,
     LsmCallEstimator as CoreLsmCallEstimator, LsmError as CoreLsmError, LsmRun as CoreLsmRun,
     OriginExercise as CoreOriginExercise, PolynomialDegree as CorePolynomialDegree,
@@ -157,6 +158,9 @@ impl IntoPyBatchLsmError for CoreBatchLsmError {
             | CoreBatchLsmError::RandomDomainRangeCollision { .. }
             | CoreBatchLsmError::CashDividendOutsideContract { .. }
             | CoreBatchLsmError::DuplicateCashDividendTime { .. }
+            | CoreBatchLsmError::NonFiniteEscrowedPrepaidCash { .. }
+            | CoreBatchLsmError::NonPositiveEscrowedPrepaidForward { .. }
+            | CoreBatchLsmError::InvalidEscrowedPrepaidForwardVolatility { .. }
             | CoreBatchLsmError::ContractMeshShapeOverflow { .. }
             | CoreBatchLsmError::FinancialInputAtRow { .. }
             | CoreBatchLsmError::SimulationPlanAtRow { .. } => InputError::new_err(message),
@@ -292,6 +296,16 @@ fn parse_origin_exercise(value: &str) -> PyResult<CoreOriginExercise> {
         "included" => Ok(CoreOriginExercise::Included),
         observed => Err(InputError::new_err(format!(
             "unsupported origin exercise convention {observed:?}"
+        ))),
+    }
+}
+
+fn parse_escrowed_volatility_convention(value: &str) -> PyResult<CoreEscrowedVolatilityConvention> {
+    match value {
+        "prepaid_forward" => Ok(CoreEscrowedVolatilityConvention::PrepaidForward),
+        "spot_matched_at_origin" => Ok(CoreEscrowedVolatilityConvention::SpotMatchedAtOrigin),
+        observed => Err(InputError::new_err(format!(
+            "unsupported escrowed volatility convention {observed:?}"
         ))),
     }
 }
@@ -1090,6 +1104,82 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     native_batch_lsm_result(py, result)
 }
 
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
+    py: Python<'py>,
+    initial_spots: PyReadonlyArray1<'py, f64>,
+    strikes: PyReadonlyArray1<'py, f64>,
+    maturities: PyReadonlyArray1<'py, f64>,
+    constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
+    constant_volatilities: PyReadonlyArray1<'py, f64>,
+    dividend_offsets: PyReadonlyArray1<'py, i64>,
+    dividend_times: PyReadonlyArray1<'py, f64>,
+    dividend_amounts: PyReadonlyArray1<'py, f64>,
+    volatility_convention: &str,
+    base_intervals: u32,
+    origin_exercise: &str,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    training_paths: usize,
+    evaluation_paths: usize,
+    training_seed: u64,
+    training_domain_start: u32,
+    evaluation_seed: u64,
+    evaluation_domain_start: u32,
+    polynomial_degree: usize,
+    rank_tolerance: f64,
+    condition_limit: f64,
+    tie_rule: &str,
+) -> PyResult<NativeBatchLsmResult<'py>> {
+    let columns = NativeBatchColumns {
+        initial_spots: initial_spots.as_slice()?,
+        strikes: strikes.as_slice()?,
+        maturities: maturities.as_slice()?,
+        constant_continuously_compounded_rates: constant_continuously_compounded_rates
+            .as_slice()?,
+        constant_volatilities: constant_volatilities.as_slice()?,
+    };
+    let dividend_offsets = dividend_offsets.as_slice()?;
+    let dividend_times = dividend_times.as_slice()?;
+    let dividend_amounts = dividend_amounts.as_slice()?;
+    let volatility_convention = parse_escrowed_volatility_convention(volatility_convention)?;
+    let method = parse_batch_lsm_method(
+        base_intervals,
+        origin_exercise,
+        training_paths,
+        evaluation_paths,
+        training_seed,
+        training_domain_start,
+        evaluation_seed,
+        evaluation_domain_start,
+        polynomial_degree,
+        rank_tolerance,
+        condition_limit,
+        tie_rule,
+    )?;
+    let core_executor = &executor.inner;
+    let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
+        let schedules = RaggedCashDividends::try_new_with_executor(
+            dividend_offsets,
+            dividend_times,
+            dividend_amounts,
+            core_executor,
+        )
+        .map_err(CoreBatchError::into_py_batch_lsm_dividend_error)?;
+        columns
+            .price(
+                CoreBatchDividendModel::EscrowedCashDividends {
+                    schedules,
+                    volatility_convention,
+                },
+                method,
+                core_executor,
+            )
+            .map_err(CoreBatchLsmError::into_py_batch_lsm_error)
+    })?;
+    native_batch_lsm_result(py, result)
+}
+
 /// Private native module.
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1111,6 +1201,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(
         price_lsm_call_batch_cash_dividends_f64,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        price_lsm_call_batch_escrowed_cash_dividends_f64,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(validate_cash_dividend_amount, module)?)?;

@@ -114,6 +114,53 @@ pub enum BatchLsmError {
         time: f64,
     },
 
+    /// Discounting an escrowed cash schedule overflowed.
+    #[error(
+        "escrowed prepaid cash is not finite at batch row {row}, event {event}: time={time:?}, amount={amount:?}, rate={rate:?}"
+    )]
+    NonFiniteEscrowedPrepaidCash {
+        /// Zero-based contract row.
+        row: usize,
+        /// Zero-based event within the row.
+        event: usize,
+        /// Event year fraction.
+        time: f64,
+        /// Deterministic cash amount.
+        amount: f64,
+        /// Constant continuously compounded rate.
+        rate: f64,
+    },
+
+    /// The observed stock does not leave a positive risky prepaid-forward component.
+    #[error(
+        "escrowed prepaid forward must be strictly positive at batch row {row}; initial spot is {initial_spot:?} and origin prepaid cash is {prepaid_cash:?}"
+    )]
+    NonPositiveEscrowedPrepaidForward {
+        /// Zero-based contract row.
+        row: usize,
+        /// Observed cum-dividend stock value.
+        initial_spot: f64,
+        /// Present value of future deterministic cash dividends.
+        prepaid_cash: f64,
+    },
+
+    /// Origin dollar-volatility matching produced an invalid prepaid-forward volatility.
+    #[error(
+        "escrowed spot-matched volatility is invalid at batch row {row}: supplied={supplied_volatility:?}, initial_spot={initial_spot:?}, prepaid_forward={prepaid_forward:?}, transformed={transformed:?}"
+    )]
+    InvalidEscrowedPrepaidForwardVolatility {
+        /// Zero-based contract row.
+        row: usize,
+        /// Supplied spot volatility.
+        supplied_volatility: f64,
+        /// Observed stock value at origin.
+        initial_spot: f64,
+        /// Risky prepaid-forward value at origin.
+        prepaid_forward: f64,
+        /// Attempted transformed volatility.
+        transformed: f64,
+    },
+
     /// A row-specific union mesh exceeds the supported node domain.
     #[error(
         "LSM batch mesh shape overflow at row {row} for {base_intervals} base intervals and {cash_events} cash events"

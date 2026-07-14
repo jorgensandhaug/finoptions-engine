@@ -17,6 +17,16 @@ pub enum OriginExercise {
     Included,
 }
 
+/// Interpretation of the volatility column for an escrowed cash-dividend approximation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum EscrowedVolatilityConvention {
+    /// Values are already volatilities of the risky prepaid-forward component.
+    PrepaidForward,
+    /// Values are origin spot volatilities, rescaled to match initial dollar volatility.
+    SpotMatchedAtOrigin,
+}
+
 /// Uniform Bermudan base mesh augmented by every exact deterministic cash-event time.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct UniformExerciseMesh {
@@ -269,6 +279,13 @@ pub enum BatchDividendModel<'a> {
         /// Exact cash-jump boundary convention.
         policy: DividendPolicy,
     },
+    /// Escrowed approximation: risky prepaid forward plus deterministic prepaid cash.
+    EscrowedCashDividends {
+        /// Row-aligned future cash schedules.
+        schedules: RaggedCashDividends<'a>,
+        /// Explicit meaning and any transformation of the volatility input column.
+        volatility_convention: EscrowedVolatilityConvention,
+    },
 }
 
 impl BatchDividendModel<'_> {
@@ -277,7 +294,8 @@ impl BatchDividendModel<'_> {
             Self::ContinuousYield {
                 annualized_decimals,
             } => annualized_decimals.len(),
-            Self::CashDividends { schedules, .. } => schedules.rows(),
+            Self::CashDividends { schedules, .. }
+            | Self::EscrowedCashDividends { schedules, .. } => schedules.rows(),
         }
     }
 }
@@ -345,7 +363,8 @@ impl<'a> BatchLsmCallInputs<'a> {
                     row,
                     annualized_decimals[row],
                 )?,
-                BatchDividendModel::CashDividends { schedules, .. } => {
+                BatchDividendModel::CashDividends { schedules, .. }
+                | BatchDividendModel::EscrowedCashDividends { schedules, .. } => {
                     let schedule = schedules.row(row).ok_or(BatchLsmError::RowCountMismatch {
                         field: "dividend_model",
                         expected: rows,
@@ -368,6 +387,20 @@ impl<'a> BatchLsmCallInputs<'a> {
                             });
                         }
                     }
+                    if let BatchDividendModel::EscrowedCashDividends {
+                        volatility_convention,
+                        ..
+                    } = dividend_model
+                    {
+                        validate_escrowed_row(
+                            row,
+                            initial_spots[row],
+                            constant_continuously_compounded_rates[row],
+                            constant_volatilities[row],
+                            schedule,
+                            volatility_convention,
+                        )?;
+                    }
                 }
             }
         }
@@ -386,6 +419,60 @@ impl<'a> BatchLsmCallInputs<'a> {
     pub const fn rows(self) -> usize {
         self.initial_spots.len()
     }
+}
+
+fn validate_escrowed_row(
+    row: usize,
+    initial_spot: f64,
+    rate: f64,
+    supplied_volatility: f64,
+    schedule: finoptions_batch::CashDividendRow<'_>,
+    volatility_convention: EscrowedVolatilityConvention,
+) -> Result<(), BatchLsmError> {
+    let prepaid_cash = escrowed_origin_prepaid_cash(row, rate, schedule)?;
+    let prepaid_forward = initial_spot - prepaid_cash;
+    if !prepaid_forward.is_finite() || prepaid_forward <= 0.0 {
+        return Err(BatchLsmError::NonPositiveEscrowedPrepaidForward {
+            row,
+            initial_spot,
+            prepaid_cash,
+        });
+    }
+    if volatility_convention == EscrowedVolatilityConvention::SpotMatchedAtOrigin {
+        let transformed = supplied_volatility * initial_spot / prepaid_forward;
+        if !transformed.is_finite() || transformed <= 0.0 {
+            return Err(BatchLsmError::InvalidEscrowedPrepaidForwardVolatility {
+                row,
+                supplied_volatility,
+                initial_spot,
+                prepaid_forward,
+                transformed,
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn escrowed_origin_prepaid_cash(
+    row: usize,
+    rate: f64,
+    schedule: finoptions_batch::CashDividendRow<'_>,
+) -> Result<f64, BatchLsmError> {
+    let mut prepaid_cash = 0.0;
+    for (event, (&time, &amount)) in schedule.times().iter().zip(schedule.amounts()).enumerate() {
+        let discounted = amount * (-rate * time).exp();
+        prepaid_cash += discounted;
+        if !discounted.is_finite() || !prepaid_cash.is_finite() {
+            return Err(BatchLsmError::NonFiniteEscrowedPrepaidCash {
+                row,
+                event,
+                time,
+                amount,
+                rate,
+            });
+        }
+    }
+    Ok(prepaid_cash)
 }
 
 fn validate_length(

@@ -2,6 +2,7 @@
 
 mod seeded;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use finoptions_core::{
@@ -21,6 +22,23 @@ pub struct GbmPathPlan {
     dividends_by_node: Box<[Option<CashDividend>]>,
     observation_nodes: Box<[NodeId]>,
     dividend_policy: DividendPolicy,
+    model_identity: GbmModelIdentity,
+}
+
+/// Exact model identity carried by path populations and fitted policies.
+#[derive(Clone, Debug, PartialEq)]
+enum GbmModelIdentity {
+    /// The GBM state is the observed stock, including explicit post-observation cash jumps.
+    Spot,
+    /// Observations were reconstructed from a risky prepaid forward and deterministic cash.
+    Escrowed { prepaid_cash_by_node: Arc<[f64]> },
+}
+
+/// Escrowed approximation over an unchanged hot-path [`GbmPathPlan`] for the risky component.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EscrowedGbmPathPlan {
+    risky_prepaid_forward: GbmPathPlan,
+    prepaid_cash_by_node: Arc<[f64]>,
 }
 
 impl GbmPathPlan {
@@ -75,6 +93,7 @@ impl GbmPathPlan {
             dividends_by_node: dividends_by_node.into_boxed_slice(),
             observation_nodes: observation_nodes.into_boxed_slice(),
             dividend_policy,
+            model_identity: GbmModelIdentity::Spot,
         })
     }
 
@@ -378,6 +397,227 @@ impl GbmPathPlan {
     }
 }
 
+impl EscrowedGbmPathPlan {
+    /// Constructs the escrowed cash-dividend approximation on an exact event-aligned grid.
+    ///
+    /// The supplied volatility belongs to the risky prepaid-forward component. Converting an
+    /// observed spot volatility, when desired, is a separate explicit financial-model decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed grid, curve, transition, or deterministic-cash valuation failure. The
+    /// original schedule is never shifted, merged, or otherwise repaired.
+    pub fn try_new(
+        schedule: &EventSchedule,
+        curve: &LogDiscountCurve,
+        volatility: ConstantVolatility,
+    ) -> Result<Self, SimulationError> {
+        if schedule.grid() != curve.grid() {
+            return Err(SimulationError::TimeGridMismatch);
+        }
+
+        let prepaid_cash_by_node: Arc<[f64]> = Arc::from(escrowed_prepaid_cash(schedule, curve)?);
+        let zero_yield_curve = CumulativeDividendYieldCurve::try_new(
+            schedule.grid(),
+            vec![0.0; schedule.grid().len()],
+        )?;
+        let risky_schedule = EventSchedule::try_new(
+            schedule.grid().clone(),
+            Vec::<CashDividend>::new(),
+            schedule.exercise_nodes().to_vec(),
+            schedule.expiry(),
+        )?;
+        let mut risky_prepaid_forward = GbmPathPlan::try_new(
+            &risky_schedule,
+            curve,
+            &zero_yield_curve,
+            volatility,
+            DividendPolicy::Liquidator,
+        )?;
+        risky_prepaid_forward.model_identity = GbmModelIdentity::Escrowed {
+            prepaid_cash_by_node: Arc::clone(&prepaid_cash_by_node),
+        };
+        Ok(Self {
+            risky_prepaid_forward,
+            prepaid_cash_by_node,
+        })
+    }
+
+    /// Borrows the exact event-aligned model grid.
+    #[must_use]
+    pub const fn grid(&self) -> &TimeGrid {
+        self.risky_prepaid_forward.grid()
+    }
+
+    /// Borrows the exact discount curve used by the risky component and deterministic cash.
+    #[must_use]
+    pub const fn curve(&self) -> &LogDiscountCurve {
+        self.risky_prepaid_forward.curve()
+    }
+
+    /// Borrows exercise nodes followed by terminal expiry.
+    #[must_use]
+    pub const fn observation_nodes(&self) -> &[NodeId] {
+        self.risky_prepaid_forward.observation_nodes()
+    }
+
+    /// Simulates serial paths and reconstructs pre-event cum-dividend stock observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed initial-state, random-input, transition, or reconstruction failure. A
+    /// nonpositive origin prepaid forward is rejected before path allocation or simulation.
+    pub fn simulate(
+        &self,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated =
+            self.risky_prepaid_forward
+                .simulate(initial_prepaid_forward, paths, normals)?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
+    /// Generates serial seeded paths and reconstructs pre-event stock observations.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed initial-state, random-generation, transition, or reconstruction failure.
+    pub fn simulate_seeded(
+        &self,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated =
+            self.risky_prepaid_forward
+                .simulate_seeded(initial_prepaid_forward, paths, stream)?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
+    pub(crate) fn simulate_parallel(
+        &self,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated = self.risky_prepaid_forward.simulate_parallel(
+            initial_prepaid_forward,
+            paths,
+            normals,
+        )?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
+    pub(crate) fn simulate_seeded_parallel(
+        &self,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated = self.risky_prepaid_forward.simulate_seeded_parallel(
+            initial_prepaid_forward,
+            paths,
+            stream,
+        )?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
+    fn initial_prepaid_forward(&self, initial_spot: f64) -> Result<f64, SimulationError> {
+        GbmPathPlan::validate_initial_spot(initial_spot)?;
+        let prepaid_cash = self.prepaid_cash_by_node[0];
+        let initial_prepaid_forward = initial_spot - prepaid_cash;
+        if !initial_prepaid_forward.is_finite() || initial_prepaid_forward <= 0.0 {
+            return Err(SimulationError::NonPositiveEscrowedPrepaidForward {
+                initial_spot,
+                prepaid_cash,
+            });
+        }
+        Ok(initial_prepaid_forward)
+    }
+
+    fn reconstruct_observed_stock(
+        &self,
+        initial_spot: f64,
+        mut simulated: SimulatedPaths,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        for (observation, node) in self.observation_nodes().iter().copied().enumerate() {
+            let start = observation * simulated.paths;
+            let row = &mut simulated.values[start..start + simulated.paths];
+            if node.get() == 0 {
+                row.fill(initial_spot);
+                continue;
+            }
+
+            let prepaid_cash = self.prepaid_cash_by_node[node.get() as usize];
+            for (path, observed) in row.iter_mut().enumerate() {
+                let prepaid_forward = *observed;
+                let stock = prepaid_forward + prepaid_cash;
+                if !stock.is_finite() {
+                    return Err(SimulationError::NonFiniteEscrowedObservation {
+                        node: node.get(),
+                        path,
+                        prepaid_forward,
+                        prepaid_cash,
+                    });
+                }
+                *observed = stock;
+            }
+        }
+        simulated.initial_spot = initial_spot;
+        Ok(simulated)
+    }
+}
+
+fn escrowed_prepaid_cash(
+    schedule: &EventSchedule,
+    curve: &LogDiscountCurve,
+) -> Result<Box<[f64]>, SimulationError> {
+    let grid = schedule.grid();
+    let mut prepaid = vec![0.0; grid.len()];
+    let mut event = schedule.dividends().len();
+    for node in (0..grid.len() - 1).rev() {
+        let interval_log_discount = curve.as_slice()[node + 1] - curve.as_slice()[node];
+        let discounted_future = prepaid[node + 1] * interval_log_discount.exp();
+        let same_node_cash =
+            if event > 0 && schedule.dividends()[event - 1].node().get() as usize == node {
+                event -= 1;
+                schedule.dividends()[event].amount()
+            } else {
+                0.0
+            };
+        let value = discounted_future + same_node_cash;
+        if !value.is_finite() {
+            return Err(SimulationError::NonFiniteEscrowedPrepaidCash {
+                node: u32::try_from(node).unwrap_or(u32::MAX),
+                discounted_future,
+                same_node_cash,
+            });
+        }
+        prepaid[node] = value;
+    }
+    debug_assert_eq!(event, 0);
+    let mut origin = 0.0;
+    for dividend in schedule.dividends() {
+        let node = dividend.node().get() as usize;
+        origin += dividend.amount() * curve.as_slice()[node].exp();
+        if !origin.is_finite() {
+            return Err(SimulationError::NonFiniteEscrowedPrepaidCash {
+                node: 0,
+                discounted_future: origin,
+                same_node_cash: 0.0,
+            });
+        }
+    }
+    prepaid[0] = origin;
+    Ok(prepaid.into_boxed_slice())
+}
+
 /// Owned time-major pre-event states at exercise nodes and expiry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulatedPaths {
@@ -507,6 +747,40 @@ mod tests {
         );
     }
 
+    fn escrowed_plan(
+        times: &[f64],
+        rate: f64,
+        dividends: &[(usize, f64)],
+        exercise_nodes: &[usize],
+        volatility: f64,
+    ) -> EscrowedGbmPathPlan {
+        let grid = TimeGrid::try_new(times).unwrap();
+        let log_discounts = times
+            .iter()
+            .enumerate()
+            .map(|(node, &time)| if node == 0 { 0.0 } else { -rate * time })
+            .collect::<Vec<_>>();
+        let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+        let dividends = dividends
+            .iter()
+            .map(|&(node, amount)| {
+                CashDividend::try_new(grid.node_id(node).unwrap(), amount).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let exercises = exercise_nodes
+            .iter()
+            .map(|&node| grid.node_id(node).unwrap())
+            .collect::<Vec<_>>();
+        let expiry = grid.node_id(grid.len() - 1).unwrap();
+        let schedule = EventSchedule::try_new(grid, dividends, exercises, expiry).unwrap();
+        EscrowedGbmPathPlan::try_new(
+            &schedule,
+            &curve,
+            ConstantVolatility::try_new(volatility).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn stores_only_time_major_exercise_and_expiry_states() {
         let plan = plan(
@@ -567,6 +841,112 @@ mod tests {
             .unwrap()[0];
         assert!(exercise > 0.0);
         assert_eq!(terminal.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn escrowed_paths_observe_pre_event_stock_and_keep_the_prepaid_forward_continuous() {
+        let rate = 0.05;
+        let volatility = 0.20;
+        let dividend = 10.0;
+        let plan = escrowed_plan(
+            &[0.0, 0.5, 1.0],
+            rate,
+            &[(1, dividend)],
+            &[0, 1],
+            volatility,
+        );
+        let initial_spot = 100.0;
+        let prepaid_cash = dividend * (-rate * 0.5_f64).exp();
+        let initial_prepaid_forward = initial_spot - prepaid_cash;
+        let half_step_growth = ((rate - 0.5 * volatility * volatility) * 0.5_f64).exp();
+        let event_prepaid_forward = initial_prepaid_forward * half_step_growth;
+        let terminal_prepaid_forward = event_prepaid_forward * half_step_growth;
+        let paths = plan.simulate(initial_spot, 1, &[0.0, 0.0]).unwrap();
+        assert_exact_slice(
+            paths.as_slice(),
+            &[
+                initial_spot,
+                event_prepaid_forward + dividend,
+                terminal_prepaid_forward,
+            ],
+        );
+    }
+
+    #[test]
+    fn escrowed_plan_rejects_a_nonpositive_prepaid_forward_before_path_work() {
+        let plan = escrowed_plan(&[0.0, 0.5, 1.0], 0.0, &[(1, 100.0)], &[], 0.20);
+        assert_eq!(
+            plan.simulate(100.0, 1, &[0.0, 0.0]).unwrap_err(),
+            SimulationError::NonPositiveEscrowedPrepaidForward {
+                initial_spot: 100.0,
+                prepaid_cash: 100.0,
+            }
+        );
+    }
+
+    #[test]
+    fn escrowed_terminal_payoffs_converge_to_their_own_european_closed_form() {
+        let rate = 0.03;
+        let volatility = 0.25;
+        let maturity = 1.0;
+        let initial_spot = 100.0;
+        let strike = 100.0;
+        let dividends = [(1, 2.0), (2, 2.0)];
+        let times = [0.0, 0.4, 0.8, maturity];
+        let plan = escrowed_plan(&times, rate, &dividends, &[], volatility);
+        let path_count = 262_144_u32;
+        let path_count_usize = usize::try_from(path_count).unwrap();
+        let simulated = plan
+            .simulate_seeded(
+                initial_spot,
+                path_count_usize,
+                RandomStream::new(0x0f31_7a11_5eec_2026, 0x51c0_0001),
+            )
+            .unwrap();
+        let discount = (-rate * maturity).exp();
+        let discounted_payoffs = simulated
+            .as_slice()
+            .iter()
+            .map(|&terminal| (terminal - strike).max(0.0) * discount)
+            .collect::<Vec<_>>();
+        let mean = discounted_payoffs.iter().sum::<f64>() / f64::from(path_count);
+        let sum_squared = discounted_payoffs
+            .iter()
+            .map(|payoff| (payoff - mean).powi(2))
+            .sum::<f64>();
+        let standard_error =
+            (sum_squared / f64::from(path_count - 1) / f64::from(path_count)).sqrt();
+        let prepaid_cash = 2.0 * (-rate * 0.4_f64).exp() + 2.0 * (-rate * 0.8_f64).exp();
+        let prepaid_forward = initial_spot - prepaid_cash;
+        let expected = black_scholes_call(prepaid_forward, strike, rate, volatility, maturity);
+        assert!(
+            (mean - expected).abs() <= 6.0 * standard_error + 1.0e-4,
+            "mean={mean}, expected={expected}, standard_error={standard_error}"
+        );
+    }
+
+    fn black_scholes_call(spot: f64, strike: f64, rate: f64, volatility: f64, time: f64) -> f64 {
+        let standard_deviation = volatility * time.sqrt();
+        let d1 = ((spot / strike).ln() + (rate + 0.5 * volatility * volatility) * time)
+            / standard_deviation;
+        let d2 = d1 - standard_deviation;
+        spot * standard_normal_cdf(d1) - strike * (-rate * time).exp() * standard_normal_cdf(d2)
+    }
+
+    fn standard_normal_cdf(value: f64) -> f64 {
+        let absolute = value.abs();
+        let t = 1.0 / (1.0 + 0.231_641_9 * absolute);
+        let polynomial =
+            (((((1.330_274_429 * t - 1.821_255_978) * t) + 1.781_477_937) * t - 0.356_563_782) * t
+                + 0.319_381_530)
+                * t;
+        let positive = 1.0
+            - (-0.5 * absolute * absolute).exp() / (2.0 * std::f64::consts::PI).sqrt() * polynomial;
+        if value >= 0.0 {
+            positive
+        } else {
+            1.0 - positive
+        }
     }
 
     #[test]

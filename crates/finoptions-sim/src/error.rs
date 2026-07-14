@@ -79,6 +79,45 @@ pub enum SimulationError {
         observed: f64,
     },
 
+    /// The deterministic cash component exhausts or exceeds the observed stock value.
+    #[error(
+        "escrowed-dividend prepaid forward must be finite and strictly positive; initial spot is {initial_spot:?} and origin prepaid cash is {prepaid_cash:?}"
+    )]
+    NonPositiveEscrowedPrepaidForward {
+        /// Observed cum-dividend stock value at valuation origin.
+        initial_spot: f64,
+        /// Deterministic present value of the future cash schedule.
+        prepaid_cash: f64,
+    },
+
+    /// Backward valuation of the deterministic cash component overflowed.
+    #[error(
+        "escrowed-dividend prepaid cash is not finite at node {node}; discounted later cash is {discounted_future:?} and same-node cash is {same_node_cash:?}"
+    )]
+    NonFiniteEscrowedPrepaidCash {
+        /// Grid node where valuation failed.
+        node: u32,
+        /// Later cash discounted back from the adjacent node.
+        discounted_future: f64,
+        /// Cash paid at this node after the pre-event observation.
+        same_node_cash: f64,
+    },
+
+    /// Adding deterministic prepaid cash to the risky state overflowed.
+    #[error(
+        "escrowed-dividend observation at node {node}, path {path} is not finite; prepaid-forward state is {prepaid_forward:?} and prepaid cash is {prepaid_cash:?}"
+    )]
+    NonFiniteEscrowedObservation {
+        /// Observation node.
+        node: u32,
+        /// Zero-based path.
+        path: usize,
+        /// Simulated risky prepaid-forward state.
+        prepaid_forward: f64,
+        /// Deterministic cash component immediately before a same-node event.
+        prepaid_cash: f64,
+    },
+
     /// A post-event stock state is negative, NaN, or infinite.
     #[error("post-event spot must be finite and nonnegative; observed {observed:?}")]
     InvalidPostEventSpot {

@@ -7,14 +7,29 @@ use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
 };
-use finoptions_sim::{CpuExecutor, GbmPathPlan, RandomStream};
+use finoptions_sim::{CpuExecutor, EscrowedGbmPathPlan, GbmPathPlan, RandomStream};
 use rayon::prelude::*;
 
 use crate::{ExerciseFitDiagnostics, LsmCallEstimator, LsmRun, RegressionDiagnostics};
 
+use super::input::escrowed_origin_prepaid_cash;
 use super::{
-    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmError, OriginExercise,
+    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmError,
+    EscrowedVolatilityConvention, OriginExercise,
 };
+
+#[derive(Clone, Copy)]
+struct RowDividendModel<'a> {
+    cash_schedule: Option<CashDividendRow<'a>>,
+    continuous_yield: f64,
+    cash_policy: DividendPolicy,
+    escrowed_volatility: Option<EscrowedVolatilityConvention>,
+}
+
+enum RowPathPlan {
+    Spot(GbmPathPlan),
+    Escrowed(EscrowedGbmPathPlan),
+}
 
 /// Compact complete per-contract outputs for one independent fixed-policy evaluation.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -132,7 +147,7 @@ impl BatchLsmCallResult {
     }
 }
 
-impl BatchLsmCallInputs<'_> {
+impl<'a> BatchLsmCallInputs<'a> {
     /// Prices every contract using outer contract parallelism and serial path-local kernels.
     ///
     /// Each row receives unique training and evaluation domains. A cash event is inserted at its
@@ -210,17 +225,31 @@ impl BatchLsmCallInputs<'_> {
             LsmCallEstimator::try_new(self.strikes[row], method.regression(), method.tie_rule())
                 .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
         let streams = method.random_streams();
-        let run = estimator
-            .price_seeded_serial(
-                &plan,
+        let training_stream =
+            RandomStream::new(streams.training_seed(), streams.training_domain(row)?);
+        let evaluation_stream =
+            RandomStream::new(streams.evaluation_seed(), streams.evaluation_domain(row)?);
+        let run = match &plan {
+            RowPathPlan::Spot(plan) => estimator.price_seeded_serial(
+                plan,
                 &curve,
                 self.initial_spots[row],
                 method.training_paths(),
                 method.evaluation_paths(),
-                RandomStream::new(streams.training_seed(), streams.training_domain(row)?),
-                RandomStream::new(streams.evaluation_seed(), streams.evaluation_domain(row)?),
-            )
-            .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
+                training_stream,
+                evaluation_stream,
+            ),
+            RowPathPlan::Escrowed(plan) => estimator.price_escrowed_seeded_serial(
+                plan,
+                &curve,
+                self.initial_spots[row],
+                method.training_paths(),
+                method.evaluation_paths(),
+                training_stream,
+                evaluation_stream,
+            ),
+        }
+        .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
         BatchLsmCallRowResult::try_from_run(row, run)
     }
 
@@ -228,22 +257,11 @@ impl BatchLsmCallInputs<'_> {
         self,
         method: BatchLsmCallMethod,
         row: usize,
-    ) -> Result<(GbmPathPlan, LogDiscountCurve), BatchLsmError> {
-        let (cash_schedule, continuous_yield, cash_policy) = match self.dividend_model {
-            BatchDividendModel::ContinuousYield {
-                annualized_decimals,
-            } => (None, annualized_decimals[row], DividendPolicy::Liquidator),
-            BatchDividendModel::CashDividends { schedules, policy } => (
-                Some(schedules.row(row).ok_or(BatchLsmError::RowCountMismatch {
-                    field: "dividend_model",
-                    expected: self.rows(),
-                    observed: schedules.rows(),
-                })?),
-                0.0,
-                policy,
-            ),
-        };
-        let cash_times = cash_schedule.map_or(&[][..], CashDividendRow::times);
+    ) -> Result<(RowPathPlan, LogDiscountCurve), BatchLsmError> {
+        let dividend = self.row_dividend_model(row)?;
+        let cash_times = dividend
+            .cash_schedule
+            .map_or(&[][..], CashDividendRow::times);
         let times = exact_union_times(
             row,
             self.maturities[row],
@@ -252,83 +270,171 @@ impl BatchLsmCallInputs<'_> {
         )?;
         let grid = TimeGrid::try_new(times)
             .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let log_discounts = grid
-            .as_slice()
-            .iter()
-            .enumerate()
-            .map(|(node, &time)| {
-                if node == 0 {
-                    0.0
-                } else {
-                    -self.constant_continuously_compounded_rates[row] * time
-                }
-            })
-            .collect::<Vec<_>>();
-        let curve = LogDiscountCurve::try_new(&grid, log_discounts)
+        let (curve, dividend_yield_curve) = build_row_curves(
+            row,
+            &grid,
+            self.constant_continuously_compounded_rates[row],
+            dividend.continuous_yield,
+        )?;
+        let schedule = build_row_schedule(
+            row,
+            grid,
+            dividend.cash_schedule,
+            method.mesh().origin_exercise(),
+        )?;
+        let volatility_value = self.row_volatility(row, dividend)?;
+        let volatility = ConstantVolatility::try_new(volatility_value)
             .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let cumulative_yields = grid
-            .as_slice()
-            .iter()
-            .enumerate()
-            .map(|(node, &time)| {
-                if node == 0 {
-                    0.0
-                } else {
-                    continuous_yield * time
-                }
-            })
-            .collect::<Vec<_>>();
-        let dividend_yield_curve = CumulativeDividendYieldCurve::try_new(&grid, cumulative_yields)
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let mut dividends = Vec::new();
-        if let Some(schedule) = cash_schedule {
-            dividends.try_reserve_exact(schedule.len()).map_err(|_| {
-                BatchLsmError::ContractMeshAllocationFailed {
-                    row,
-                    nodes: schedule.len(),
-                }
-            })?;
-            for (event, (&time, &amount)) in
-                schedule.times().iter().zip(schedule.amounts()).enumerate()
-            {
-                let node = grid
-                    .as_slice()
-                    .binary_search_by(|candidate| candidate.total_cmp(&time))
-                    .map_err(|_| BatchLsmError::CashDividendNodeMissing { row, event, time })?;
-                let node = grid
-                    .node_id(node)
-                    .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-                dividends.push(
-                    CashDividend::try_new(node, amount)
-                        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?,
-                );
-            }
+        let plan = if dividend.escrowed_volatility.is_some() {
+            EscrowedGbmPathPlan::try_new(&schedule, &curve, volatility).map(RowPathPlan::Escrowed)
+        } else {
+            GbmPathPlan::try_new(
+                &schedule,
+                &curve,
+                &dividend_yield_curve,
+                volatility,
+                dividend.cash_policy,
+            )
+            .map(RowPathPlan::Spot)
         }
-        let exercise_start = match method.mesh().origin_exercise() {
-            OriginExercise::Excluded => 1,
-            OriginExercise::Included => 0,
-        };
-        let exercise_nodes = (exercise_start..grid.len() - 1)
-            .map(|node| grid.node_id(node))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let expiry = grid
-            .node_id(grid.len() - 1)
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let schedule = EventSchedule::try_new(grid, dividends, exercise_nodes, expiry)
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let volatility = ConstantVolatility::try_new(self.constant_volatilities[row])
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let plan = GbmPathPlan::try_new(
-            &schedule,
-            &curve,
-            &dividend_yield_curve,
-            volatility,
-            cash_policy,
-        )
         .map_err(|source| BatchLsmError::SimulationPlanAtRow { row, source })?;
         Ok((plan, curve))
     }
+
+    fn row_dividend_model(self, row: usize) -> Result<RowDividendModel<'a>, BatchLsmError> {
+        match self.dividend_model {
+            BatchDividendModel::ContinuousYield {
+                annualized_decimals,
+            } => Ok(RowDividendModel {
+                cash_schedule: None,
+                continuous_yield: annualized_decimals[row],
+                cash_policy: DividendPolicy::Liquidator,
+                escrowed_volatility: None,
+            }),
+            BatchDividendModel::CashDividends { schedules, policy } => Ok(RowDividendModel {
+                cash_schedule: Some(self.cash_row(schedules, row)?),
+                continuous_yield: 0.0,
+                cash_policy: policy,
+                escrowed_volatility: None,
+            }),
+            BatchDividendModel::EscrowedCashDividends {
+                schedules,
+                volatility_convention,
+            } => Ok(RowDividendModel {
+                cash_schedule: Some(self.cash_row(schedules, row)?),
+                continuous_yield: 0.0,
+                cash_policy: DividendPolicy::Liquidator,
+                escrowed_volatility: Some(volatility_convention),
+            }),
+        }
+    }
+
+    fn cash_row(
+        self,
+        schedules: finoptions_batch::RaggedCashDividends<'a>,
+        row: usize,
+    ) -> Result<CashDividendRow<'a>, BatchLsmError> {
+        schedules.row(row).ok_or(BatchLsmError::RowCountMismatch {
+            field: "dividend_model",
+            expected: self.rows(),
+            observed: schedules.rows(),
+        })
+    }
+
+    fn row_volatility(
+        self,
+        row: usize,
+        dividend: RowDividendModel<'a>,
+    ) -> Result<f64, BatchLsmError> {
+        if dividend.escrowed_volatility != Some(EscrowedVolatilityConvention::SpotMatchedAtOrigin) {
+            return Ok(self.constant_volatilities[row]);
+        }
+        let schedule = dividend
+            .cash_schedule
+            .ok_or(BatchLsmError::RowCountMismatch {
+                field: "escrowed_cash_dividends",
+                expected: self.rows(),
+                observed: 0,
+            })?;
+        let prepaid_cash = escrowed_origin_prepaid_cash(
+            row,
+            self.constant_continuously_compounded_rates[row],
+            schedule,
+        )?;
+        let prepaid_forward = self.initial_spots[row] - prepaid_cash;
+        Ok(self.constant_volatilities[row] * self.initial_spots[row] / prepaid_forward)
+    }
+}
+
+fn build_row_curves(
+    row: usize,
+    grid: &TimeGrid,
+    rate: f64,
+    continuous_yield: f64,
+) -> Result<(LogDiscountCurve, CumulativeDividendYieldCurve), BatchLsmError> {
+    let log_discounts = grid
+        .as_slice()
+        .iter()
+        .enumerate()
+        .map(|(node, &time)| if node == 0 { 0.0 } else { -rate * time })
+        .collect::<Vec<_>>();
+    let curve = LogDiscountCurve::try_new(grid, log_discounts)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    let cumulative_yields = grid
+        .as_slice()
+        .iter()
+        .enumerate()
+        .map(|(node, &time)| {
+            if node == 0 {
+                0.0
+            } else {
+                continuous_yield * time
+            }
+        })
+        .collect::<Vec<_>>();
+    let yield_curve = CumulativeDividendYieldCurve::try_new(grid, cumulative_yields)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    Ok((curve, yield_curve))
+}
+
+fn build_row_schedule(
+    row: usize,
+    grid: TimeGrid,
+    cash_schedule: Option<CashDividendRow<'_>>,
+    origin_exercise: OriginExercise,
+) -> Result<EventSchedule, BatchLsmError> {
+    let mut dividends = Vec::new();
+    if let Some(cash) = cash_schedule {
+        dividends.try_reserve_exact(cash.len()).map_err(|_| {
+            BatchLsmError::ContractMeshAllocationFailed {
+                row,
+                nodes: cash.len(),
+            }
+        })?;
+        for (event, (&time, &amount)) in cash.times().iter().zip(cash.amounts()).enumerate() {
+            let index = grid
+                .as_slice()
+                .binary_search_by(|candidate| candidate.total_cmp(&time))
+                .map_err(|_| BatchLsmError::CashDividendNodeMissing { row, event, time })?;
+            let node = grid
+                .node_id(index)
+                .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+            dividends.push(
+                CashDividend::try_new(node, amount)
+                    .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?,
+            );
+        }
+    }
+    let exercise_start = usize::from(origin_exercise == OriginExercise::Excluded);
+    let exercise_nodes = (exercise_start..grid.len() - 1)
+        .map(|node| grid.node_id(node))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    let expiry = grid
+        .node_id(grid.len() - 1)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    EventSchedule::try_new(grid, dividends, exercise_nodes, expiry)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })
 }
 
 fn exact_union_times(
@@ -1028,7 +1134,78 @@ mod tests {
     }
 
     #[test]
-    fn serial_and_parallel_batches_are_bitwise_identical_for_both_dividend_models() {
+    fn escrowed_batch_matches_an_independently_constructed_scalar_plan_bitwise() {
+        let spots = [100.0];
+        let strikes = [100.0];
+        let maturities = [1.0];
+        let rates = [0.05];
+        let spot_volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 1], &[0.3], &[2.0]).unwrap();
+        let batch_inputs = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &spot_volatilities,
+            BatchDividendModel::EscrowedCashDividends {
+                schedules: dividends,
+                volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+            },
+        )
+        .unwrap();
+        let batch_method = method(OriginExercise::Excluded);
+        let batch_result = batch_inputs
+            .price(batch_method, &CpuExecutor::try_new(1).unwrap())
+            .unwrap();
+
+        let grid = TimeGrid::try_new(vec![
+            0.0, 0.125, 0.25, 0.3, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0,
+        ])
+        .unwrap();
+        let log_discounts = grid
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(node, &time)| if node == 0 { 0.0 } else { -rates[0] * time })
+            .collect::<Vec<_>>();
+        let curve = LogDiscountCurve::try_new(&grid, log_discounts).unwrap();
+        let cash = CashDividend::try_new(grid.node_id(3).unwrap(), 2.0).unwrap();
+        let exercise_nodes = (1..grid.len() - 1)
+            .map(|node| grid.node_id(node).unwrap())
+            .collect::<Vec<_>>();
+        let expiry = grid.node_id(grid.len() - 1).unwrap();
+        let schedule = EventSchedule::try_new(grid, [cash], exercise_nodes, expiry).unwrap();
+        let prepaid_cash = 2.0 * (-rates[0] * 0.3_f64).exp();
+        let prepaid_forward = spots[0] - prepaid_cash;
+        let prepaid_forward_volatility = spot_volatilities[0] * spots[0] / prepaid_forward;
+        let plan = EscrowedGbmPathPlan::try_new(
+            &schedule,
+            &curve,
+            ConstantVolatility::try_new(prepaid_forward_volatility).unwrap(),
+        )
+        .unwrap();
+        let scalar_run = LsmCallEstimator::try_new(
+            strikes[0],
+            batch_method.regression(),
+            batch_method.tie_rule(),
+        )
+        .unwrap()
+        .price_escrowed_seeded_serial(
+            &plan,
+            &curve,
+            spots[0],
+            batch_method.training_paths(),
+            batch_method.evaluation_paths(),
+            RandomStream::new(7, 0),
+            RandomStream::new(11, 10_000),
+        )
+        .unwrap();
+        let scalar_result = BatchLsmCallRowResult::try_from_run(0, scalar_run).unwrap();
+        assert_eq!(batch_result.as_slice(), &[scalar_result]);
+    }
+
+    #[test]
+    fn serial_and_parallel_batches_are_bitwise_identical_for_all_dividend_models() {
         let spots = [100.0, 120.0];
         let strikes = [100.0, 110.0];
         let maturities = [1.0, 0.75];
@@ -1090,6 +1267,32 @@ mod tests {
             assert!(result.standard_error() > 0.0);
             assert_eq!(result.early_exercise_paths() + result.expiry_paths(), 2_048);
         }
+
+        let escrowed = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::EscrowedCashDividends {
+                schedules: dividends,
+                volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+            },
+        )
+        .unwrap();
+        let serial = escrowed
+            .price(
+                method(OriginExercise::Excluded),
+                &CpuExecutor::try_new(1).unwrap(),
+            )
+            .unwrap();
+        let parallel = escrowed
+            .price(
+                method(OriginExercise::Excluded),
+                &CpuExecutor::try_new(4).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(serial, parallel);
     }
 
     #[test]

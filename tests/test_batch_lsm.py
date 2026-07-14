@@ -15,6 +15,8 @@ from finoptions import (
     CpuExecutor,
     CumulativeDividendYieldCurve,
     DividendPolicy,
+    EscrowedCashDividendBatch,
+    EscrowedVolatilityConvention,
     EventSchedule,
     ExerciseTieRule,
     InputError,
@@ -206,6 +208,71 @@ def test_cash_batch_inserts_exact_events_and_is_thread_invariant() -> None:
         serial.expiry_paths,
     ):
         assert not values.flags.writeable
+
+
+def test_escrowed_batch_is_thread_invariant_and_volatility_semantics_are_explicit() -> None:
+    """Origin spot matching is exactly the declared prepaid-forward volatility transformation."""
+    schedules = RaggedCashDividends(
+        offsets=np.array([0, 1], dtype=np.int64),
+        times=np.array([0.5], dtype=np.float64),
+        amounts=np.array([10.0], dtype=np.float64),
+    )
+    initial_spots = np.array([100.0], dtype=np.float64)
+    strikes = np.array([100.0], dtype=np.float64)
+    maturities = np.array([1.0], dtype=np.float64)
+    rates = np.array([0.0], dtype=np.float64)
+    spot_volatility = np.array([0.20], dtype=np.float64)
+    prepaid_forward_volatility = np.array([0.20 * 100.0 / 90.0], dtype=np.float64)
+    common = {
+        "initial_spots": initial_spots,
+        "strikes": strikes,
+        "maturities": maturities,
+        "rates": rates,
+        "mesh": mesh(),
+        "method": method(),
+    }
+    spot_matched = price_lsm_call_batch(
+        **common,
+        volatilities=spot_volatility,
+        dividends=EscrowedCashDividendBatch(
+            schedules=schedules,
+            volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+        ),
+        executor=CpuExecutor(threads=1),
+    )
+    direct = price_lsm_call_batch(
+        **common,
+        volatilities=prepaid_forward_volatility,
+        dividends=EscrowedCashDividendBatch(
+            schedules=schedules,
+            volatility_convention=EscrowedVolatilityConvention.PREPAID_FORWARD,
+        ),
+        executor=CpuExecutor(threads=4),
+    )
+    assert_batch_equal(spot_matched, direct)
+
+
+def test_escrowed_batch_fails_before_simulation_when_cash_exhausts_spot() -> None:
+    """The approximation never repairs an invalid nonpositive risky prepaid forward."""
+    with pytest.raises(InputError, match=r"prepaid forward must be strictly positive.*row 0"):
+        price_lsm_call_batch(
+            initial_spots=np.array([100.0], dtype=np.float64),
+            strikes=np.array([100.0], dtype=np.float64),
+            maturities=np.array([1.0], dtype=np.float64),
+            rates=np.array([0.0], dtype=np.float64),
+            volatilities=np.array([0.20], dtype=np.float64),
+            dividends=EscrowedCashDividendBatch(
+                schedules=RaggedCashDividends(
+                    offsets=np.array([0, 1], dtype=np.int64),
+                    times=np.array([0.5], dtype=np.float64),
+                    amounts=np.array([100.0], dtype=np.float64),
+                ),
+                volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+            ),
+            mesh=mesh(),
+            method=method(),
+            executor=CpuExecutor(threads=2),
+        )
 
 
 def test_included_origin_is_one_common_pre_event_exercise_decision() -> None:

@@ -181,10 +181,13 @@ batch_result = price_lsm_call_batch(
 )
 ```
 
-Rows receive disjoint, addressable random domains. Exact cash schedules use the separate
-`CashDividendBatch` variant; no yield/cash conversion is inferred. Parallel and serial execution of
-an identical request are bitwise equivalent, while independent numerical methods are validated by
-financial identities, bounds, convergence, and justified tolerances rather than forced equality.
+Rows receive disjoint, addressable random domains. Exact cash schedules use `CashDividendBatch`.
+The distinct prepaid-forward approximation uses `EscrowedCashDividendBatch` and requires either
+`EscrowedVolatilityConvention.PREPAID_FORWARD` or
+`EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN`; no dividend representation or volatility
+meaning is inferred. Parallel and serial execution of an identical request are bitwise equivalent,
+while independent numerical methods are validated by financial identities, bounds, convergence,
+and justified tolerances rather than forced equality.
 
 The current project-shaped CPU and memory measurements are recorded as a reproducible
 [performance checkpoint](docs/performance/2026-07-14-lsm-batch.md).
