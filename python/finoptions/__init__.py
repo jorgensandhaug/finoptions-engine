@@ -12,9 +12,11 @@ from .batch_lsm import (
     EscrowedCashDividendBatch,
     EscrowedVolatilityConvention,
     LsmBatchResult,
+    LsmStrikeGroups,
     OriginExercise,
     UniformExerciseMesh,
     price_lsm_call_batch,
+    price_lsm_call_grouped_batch,
 )
 from .dividends import (
     BatchError,
@@ -102,6 +104,7 @@ __all__ = [
     "LsmBatchResult",
     "LsmError",
     "LsmResult",
+    "LsmStrikeGroups",
     "MaturityBoundary",
     "NoInTheMoneyPathsDiagnostics",
     "OriginDecisionDiagnostics",
@@ -120,6 +123,7 @@ __all__ = [
     "pack_padded_cash_dividends",
     "price_lsm_call",
     "price_lsm_call_batch",
+    "price_lsm_call_grouped_batch",
     "simulate_gbm",
     "simulate_gbm_seeded",
 ]

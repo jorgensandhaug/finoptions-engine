@@ -7,16 +7,23 @@ use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
 };
-use finoptions_sim::{CpuExecutor, CpuMathBackend, EscrowedGbmPathPlan, GbmPathPlan, RandomStream};
+use finoptions_sim::{
+    CpuExecutor, CpuMathBackend, EscrowedGbmPathPlan, GbmPathPlan, RandomStream, SimulatedPaths,
+};
 use rayon::prelude::*;
 
-use crate::{ExerciseFitDiagnostics, LsmCallEstimator, LsmRun, RegressionDiagnostics};
+use crate::{
+    ExerciseFitDiagnostics, FittedLsmCallPolicy, LsmCallEstimator, LsmError, LsmEvaluation, LsmRun,
+    RegressionDiagnostics,
+};
 
 use super::input::escrowed_origin_prepaid_cash;
 use super::{
     BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmError,
-    EscrowedVolatilityConvention, OriginExercise,
+    EscrowedVolatilityConvention, GroupedBatchLsmCallInputs, OriginExercise,
 };
+
+const GROUP_PARALLEL_LEAF: usize = 1;
 
 #[derive(Clone, Copy)]
 struct RowDividendModel<'a> {
@@ -29,6 +36,12 @@ struct RowDividendModel<'a> {
 enum RowPathPlan {
     Spot(GbmPathPlan),
     Escrowed(EscrowedGbmPathPlan),
+}
+
+#[derive(Clone, Copy)]
+enum GroupPopulation {
+    Training,
+    Evaluation,
 }
 
 /// Compact complete per-contract outputs for one independent fixed-policy evaluation.
@@ -272,46 +285,15 @@ impl<'a> BatchLsmCallInputs<'a> {
         row: usize,
     ) -> Result<(RowPathPlan, LogDiscountCurve), BatchLsmError> {
         let dividend = self.row_dividend_model(row)?;
-        let cash_times = dividend
-            .cash_schedule
-            .map_or(&[][..], CashDividendRow::times);
-        let times = exact_union_times(
+        build_path_plan(
             row,
+            method,
+            self.initial_spots[row],
             self.maturities[row],
-            method.mesh().base_intervals(),
-            cash_times,
-        )?;
-        let grid = TimeGrid::try_new(times)
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let (curve, dividend_yield_curve) = build_row_curves(
-            row,
-            &grid,
             self.constant_continuously_compounded_rates[row],
-            dividend.continuous_yield,
-        )?;
-        let schedule = build_row_schedule(
-            row,
-            grid,
-            dividend.cash_schedule,
-            method.mesh().origin_exercise(),
-        )?;
-        let volatility_value = self.row_volatility(row, dividend)?;
-        let volatility = ConstantVolatility::try_new(volatility_value)
-            .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
-        let plan = if dividend.escrowed_volatility.is_some() {
-            EscrowedGbmPathPlan::try_new(&schedule, &curve, volatility).map(RowPathPlan::Escrowed)
-        } else {
-            GbmPathPlan::try_new(
-                &schedule,
-                &curve,
-                &dividend_yield_curve,
-                volatility,
-                dividend.cash_policy,
-            )
-            .map(RowPathPlan::Spot)
-        }
-        .map_err(|source| BatchLsmError::SimulationPlanAtRow { row, source })?;
-        Ok((plan, curve))
+            self.constant_volatilities[row],
+            dividend,
+        )
     }
 
     fn row_dividend_model(self, row: usize) -> Result<RowDividendModel<'a>, BatchLsmError> {
@@ -353,30 +335,304 @@ impl<'a> BatchLsmCallInputs<'a> {
             observed: schedules.rows(),
         })
     }
+}
 
-    fn row_volatility(
+impl<'a> GroupedBatchLsmCallInputs<'a> {
+    /// Prices strike groups with one group-addressed path pair per simulation state.
+    ///
+    /// Every strike retains a separately fitted stopping policy and independent out-of-sample
+    /// valuation. Contracts within a group intentionally share common random numbers because their
+    /// complete simulated market state is represented once at the type boundary. Parallel results
+    /// are invariant to worker count on one numerical build.
+    ///
+    /// # Errors
+    ///
+    /// Returns before allocation if group-addressed random domains are invalid, or returns the
+    /// first contract-addressed financial, simulation, regression, support, or arithmetic error.
+    /// No group, strike, path count, event, or estimator setting is changed.
+    pub fn price(
         self,
-        row: usize,
-        dividend: RowDividendModel<'a>,
-    ) -> Result<f64, BatchLsmError> {
-        if dividend.escrowed_volatility != Some(EscrowedVolatilityConvention::SpotMatchedAtOrigin) {
-            return Ok(self.constant_volatilities[row]);
-        }
-        let schedule = dividend
-            .cash_schedule
-            .ok_or(BatchLsmError::RowCountMismatch {
-                field: "escrowed_cash_dividends",
-                expected: self.rows(),
-                observed: 0,
-            })?;
-        let prepaid_cash = escrowed_origin_prepaid_cash(
-            row,
-            self.constant_continuously_compounded_rates[row],
-            schedule,
-        )?;
-        let prepaid_forward = self.initial_spots[row] - prepaid_cash;
-        Ok(self.constant_volatilities[row] * self.initial_spots[row] / prepaid_forward)
+        method: BatchLsmCallMethod,
+        executor: &CpuExecutor,
+    ) -> Result<BatchLsmCallResult, BatchLsmError> {
+        method.random_streams().validate(self.groups())?;
+        let math_backend = executor.math_backend();
+        executor.dispatch(
+            || self.price_serial(method, math_backend),
+            || self.price_parallel(method, math_backend),
+        )
     }
+
+    fn price_serial(
+        self,
+        method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
+    ) -> Result<BatchLsmCallResult, BatchLsmError> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.rows())
+            .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: self.rows() })?;
+        rows.resize(self.rows(), BatchLsmCallRowResult::default());
+        for group in 0..self.groups() {
+            let range = self.group_range(group);
+            self.price_group_into(method, math_backend, group, &mut rows[range])?;
+        }
+        Ok(BatchLsmCallResult { rows })
+    }
+
+    fn price_parallel(
+        self,
+        method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
+    ) -> Result<BatchLsmCallResult, BatchLsmError> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.rows())
+            .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: self.rows() })?;
+        rows.resize(self.rows(), BatchLsmCallRowResult::default());
+        self.price_group_range(method, math_backend, 0, self.groups(), &mut rows)?;
+        Ok(BatchLsmCallResult { rows })
+    }
+
+    fn price_group_range(
+        self,
+        method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
+        group_start: usize,
+        group_end: usize,
+        output: &mut [BatchLsmCallRowResult],
+    ) -> Result<(), BatchLsmError> {
+        if group_end - group_start <= GROUP_PARALLEL_LEAF {
+            let base_row = self.group_range(group_start).start;
+            for group in group_start..group_end {
+                let range = self.group_range(group);
+                let local_start = range.start - base_row;
+                let local_end = range.end - base_row;
+                self.price_group_into(
+                    method,
+                    math_backend,
+                    group,
+                    &mut output[local_start..local_end],
+                )?;
+            }
+            return Ok(());
+        }
+        let middle_group = group_start + (group_end - group_start) / 2;
+        let base_row = self.group_range(group_start).start;
+        let middle_row = self.group_range(middle_group).start - base_row;
+        let (left_output, right_output) = output.split_at_mut(middle_row);
+        let (left, right) = rayon::join(
+            || self.price_group_range(method, math_backend, group_start, middle_group, left_output),
+            || self.price_group_range(method, math_backend, middle_group, group_end, right_output),
+        );
+        match (left, right) {
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn price_group_into(
+        self,
+        method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
+        group: usize,
+        output: &mut [BatchLsmCallRowResult],
+    ) -> Result<(), BatchLsmError> {
+        let range = self.group_range(group);
+        debug_assert_eq!(range.len(), output.len());
+        let first_row = range.start;
+        let dividend = self.group_dividend_model(group)?;
+        let (plan, curve) = build_path_plan(
+            first_row,
+            method,
+            self.initial_spots[group],
+            self.maturities[group],
+            self.constant_continuously_compounded_rates[group],
+            self.constant_volatilities[group],
+            dividend,
+        )?;
+        let streams = method.random_streams();
+        let training_stream =
+            RandomStream::new(streams.training_seed(), streams.training_domain(group)?);
+        let evaluation_stream =
+            RandomStream::new(streams.evaluation_seed(), streams.evaluation_domain(group)?);
+        let training = simulate_group_population(
+            &plan,
+            math_backend,
+            self.initial_spots[group],
+            method.training_paths(),
+            training_stream,
+            GroupPopulation::Training,
+        )
+        .map_err(|source| BatchLsmError::EstimatorAtRow {
+            row: first_row,
+            source,
+        })?;
+        let mut policies = Vec::new();
+        policies
+            .try_reserve_exact(range.len())
+            .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: range.len() })?;
+        for local_row in 0..range.len() {
+            let row = first_row + local_row;
+            let estimator = LsmCallEstimator::try_new(
+                self.strikes[row],
+                method.regression(),
+                method.tie_rule(),
+            )
+            .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
+            let policy = estimator
+                .fit(&training, &curve, self.initial_spots[group])
+                .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
+            policies.push(policy);
+        }
+        drop(training);
+        let evaluation = simulate_group_population(
+            &plan,
+            math_backend,
+            self.initial_spots[group],
+            method.evaluation_paths(),
+            evaluation_stream,
+            GroupPopulation::Evaluation,
+        )
+        .map_err(|source| BatchLsmError::EstimatorAtRow {
+            row: first_row,
+            source,
+        })?;
+        for (local_row, (policy, output)) in policies.into_iter().zip(output).enumerate() {
+            let row = first_row + local_row;
+            let valuation = policy
+                .evaluate(&evaluation)
+                .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
+            *output = BatchLsmCallRowResult::try_from_parts(row, &policy, &valuation)?;
+        }
+        Ok(())
+    }
+
+    fn group_dividend_model(self, group: usize) -> Result<RowDividendModel<'a>, BatchLsmError> {
+        match self.dividend_model {
+            BatchDividendModel::ContinuousYield {
+                annualized_decimals,
+            } => Ok(RowDividendModel {
+                cash_schedule: None,
+                continuous_yield: annualized_decimals[group],
+                cash_policy: DividendPolicy::Liquidator,
+                escrowed_volatility: None,
+            }),
+            BatchDividendModel::CashDividends { schedules, policy } => Ok(RowDividendModel {
+                cash_schedule: Some(self.group_cash_row(schedules, group)?),
+                continuous_yield: 0.0,
+                cash_policy: policy,
+                escrowed_volatility: None,
+            }),
+            BatchDividendModel::EscrowedCashDividends {
+                schedules,
+                volatility_convention,
+            } => Ok(RowDividendModel {
+                cash_schedule: Some(self.group_cash_row(schedules, group)?),
+                continuous_yield: 0.0,
+                cash_policy: DividendPolicy::Liquidator,
+                escrowed_volatility: Some(volatility_convention),
+            }),
+        }
+    }
+
+    fn group_cash_row(
+        self,
+        schedules: finoptions_batch::RaggedCashDividends<'a>,
+        group: usize,
+    ) -> Result<CashDividendRow<'a>, BatchLsmError> {
+        schedules.row(group).ok_or(BatchLsmError::RowCountMismatch {
+            field: "dividend_model",
+            expected: self.groups(),
+            observed: schedules.rows(),
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_group_population(
+    plan: &RowPathPlan,
+    math_backend: CpuMathBackend,
+    initial_spot: f64,
+    paths: usize,
+    stream: RandomStream,
+    population: GroupPopulation,
+) -> Result<SimulatedPaths, LsmError> {
+    let simulated = match plan {
+        RowPathPlan::Spot(plan) => {
+            plan.simulate_seeded_with_math_backend(math_backend, initial_spot, paths, stream)
+        }
+        RowPathPlan::Escrowed(plan) => {
+            plan.simulate_seeded_with_math_backend(math_backend, initial_spot, paths, stream)
+        }
+    };
+    simulated.map_err(|source| match population {
+        GroupPopulation::Training => LsmError::TrainingSimulation { source },
+        GroupPopulation::Evaluation => LsmError::EvaluationSimulation { source },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_path_plan(
+    row: usize,
+    method: BatchLsmCallMethod,
+    initial_spot: f64,
+    maturity: f64,
+    rate: f64,
+    supplied_volatility: f64,
+    dividend: RowDividendModel<'_>,
+) -> Result<(RowPathPlan, LogDiscountCurve), BatchLsmError> {
+    let cash_times = dividend
+        .cash_schedule
+        .map_or(&[][..], CashDividendRow::times);
+    let times = exact_union_times(row, maturity, method.mesh().base_intervals(), cash_times)?;
+    let grid = TimeGrid::try_new(times)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    let (curve, dividend_yield_curve) =
+        build_row_curves(row, &grid, rate, dividend.continuous_yield)?;
+    let schedule = build_row_schedule(
+        row,
+        grid,
+        dividend.cash_schedule,
+        method.mesh().origin_exercise(),
+    )?;
+    let volatility_value = path_volatility(row, initial_spot, rate, supplied_volatility, dividend)?;
+    let volatility = ConstantVolatility::try_new(volatility_value)
+        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    let plan = if dividend.escrowed_volatility.is_some() {
+        EscrowedGbmPathPlan::try_new(&schedule, &curve, volatility).map(RowPathPlan::Escrowed)
+    } else {
+        GbmPathPlan::try_new(
+            &schedule,
+            &curve,
+            &dividend_yield_curve,
+            volatility,
+            dividend.cash_policy,
+        )
+        .map(RowPathPlan::Spot)
+    }
+    .map_err(|source| BatchLsmError::SimulationPlanAtRow { row, source })?;
+    Ok((plan, curve))
+}
+
+fn path_volatility(
+    row: usize,
+    initial_spot: f64,
+    rate: f64,
+    supplied_volatility: f64,
+    dividend: RowDividendModel<'_>,
+) -> Result<f64, BatchLsmError> {
+    if dividend.escrowed_volatility != Some(EscrowedVolatilityConvention::SpotMatchedAtOrigin) {
+        return Ok(supplied_volatility);
+    }
+    let schedule = dividend
+        .cash_schedule
+        .ok_or(BatchLsmError::RowCountMismatch {
+            field: "escrowed_cash_dividends",
+            expected: 1,
+            observed: 0,
+        })?;
+    let prepaid_cash = escrowed_origin_prepaid_cash(row, rate, schedule)?;
+    let prepaid_forward = initial_spot - prepaid_cash;
+    Ok(supplied_volatility * initial_spot / prepaid_forward)
 }
 
 fn build_row_curves(
@@ -543,6 +799,14 @@ fn next_base_node(node: u32, final_node: u32) -> Option<u32> {
 impl BatchLsmCallRowResult {
     fn try_from_run(row: usize, run: LsmRun) -> Result<Self, BatchLsmError> {
         let (policy, evaluation) = run.into_parts();
+        Self::try_from_parts(row, &policy, &evaluation)
+    }
+
+    fn try_from_parts(
+        row: usize,
+        policy: &FittedLsmCallPolicy,
+        evaluation: &LsmEvaluation,
+    ) -> Result<Self, BatchLsmError> {
         let mut origin_decision_fitted = false;
         let mut origin_exercised = false;
         let mut regression_nodes = 0_usize;
@@ -677,6 +941,29 @@ mod tests {
         .unwrap()
     }
 
+    fn valid_grouped_continuous_inputs<'a>(
+        group_offsets: &'a [u32],
+        spots: &'a [f64],
+        strikes: &'a [f64],
+        maturities: &'a [f64],
+        rates: &'a [f64],
+        volatilities: &'a [f64],
+        yields: &'a [f64],
+    ) -> GroupedBatchLsmCallInputs<'a> {
+        GroupedBatchLsmCallInputs::try_new(
+            group_offsets,
+            spots,
+            strikes,
+            maturities,
+            rates,
+            volatilities,
+            BatchDividendModel::ContinuousYield {
+                annualized_decimals: yields,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn exact_union_mesh_inserts_cash_times_without_rounding_or_duplication() {
         assert_eq!(
@@ -737,6 +1024,232 @@ mod tests {
                 observed: 1,
             })
         ));
+    }
+
+    #[test]
+    fn grouped_boundaries_and_compact_axes_fail_before_simulation() {
+        let spots = [100.0, 120.0];
+        let strikes = [90.0, 100.0, 110.0, 120.0];
+        let maturities = [1.0, 0.75];
+        let rates = [0.05, 0.03];
+        let volatilities = [0.25, 0.30];
+        let yields = [0.02, 0.01];
+        let dividends = BatchDividendModel::ContinuousYield {
+            annualized_decimals: &yields,
+        };
+        assert!(matches!(
+            GroupedBatchLsmCallInputs::try_new(
+                &[0, 2],
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividends,
+            ),
+            Err(BatchLsmError::GroupOffsetCountMismatch {
+                expected: 3,
+                observed: 2,
+            })
+        ));
+        assert!(matches!(
+            GroupedBatchLsmCallInputs::try_new(
+                &[1, 2, 4],
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividends,
+            ),
+            Err(BatchLsmError::GroupOffsetsDoNotStartAtZero { observed: 1 })
+        ));
+        assert!(matches!(
+            GroupedBatchLsmCallInputs::try_new(
+                &[0, 0, 4],
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividends,
+            ),
+            Err(BatchLsmError::InvalidGroupRange {
+                group: 0,
+                start: 0,
+                end: 0,
+            })
+        ));
+        assert!(matches!(
+            GroupedBatchLsmCallInputs::try_new(
+                &[0, 2, 3],
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividends,
+            ),
+            Err(BatchLsmError::GroupOffsetEndMismatch {
+                expected: 4,
+                observed: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn one_contract_groups_match_row_addressed_batches_for_all_dividend_models_bitwise() {
+        let group_offsets = [0, 1, 2];
+        let spots = [100.0, 120.0];
+        let strikes = [100.0, 110.0];
+        let maturities = [1.0, 0.75];
+        let rates = [0.05, 0.03];
+        let volatilities = [0.25, 0.30];
+        let yields = [0.02, 0.01];
+        let pricing_method = method(OriginExercise::Excluded);
+        let executor = CpuExecutor::try_new(1).unwrap();
+
+        let row_continuous = valid_continuous_inputs(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        )
+        .price(pricing_method, &executor)
+        .unwrap();
+        let grouped_continuous = valid_grouped_continuous_inputs(
+            &group_offsets,
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        )
+        .price(pricing_method, &executor)
+        .unwrap();
+        assert_eq!(grouped_continuous, row_continuous);
+
+        let dividends =
+            RaggedCashDividends::try_new(&[0, 2, 3], &[0.2, 0.6, 0.4], &[1.0, 1.0, 2.0]).unwrap();
+        for dividend_model in [
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Survivor,
+            },
+            BatchDividendModel::EscrowedCashDividends {
+                schedules: dividends,
+                volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+            },
+        ] {
+            let row = BatchLsmCallInputs::try_new(
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividend_model,
+            )
+            .unwrap()
+            .price(pricing_method, &executor)
+            .unwrap();
+            let grouped = GroupedBatchLsmCallInputs::try_new(
+                &group_offsets,
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividend_model,
+            )
+            .unwrap()
+            .price(pricing_method, &executor)
+            .unwrap();
+            assert_eq!(grouped, row);
+        }
+    }
+
+    #[test]
+    fn shared_group_uses_one_population_without_changing_strike_specific_results() {
+        let group_offsets = [0, 3];
+        let spots = [100.0];
+        let strikes = [95.0, 100.0, 100.0];
+        let maturities = [1.0];
+        let rates = [0.05];
+        let volatilities = [0.25];
+        let yields = [0.02];
+        let results = valid_grouped_continuous_inputs(
+            &group_offsets,
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        )
+        .price(
+            method(OriginExercise::Excluded),
+            &CpuExecutor::try_new(1).unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(results.as_slice()[0], results.as_slice()[1]);
+        assert_eq!(results.as_slice()[1], results.as_slice()[2]);
+    }
+
+    #[test]
+    fn grouped_serial_and_parallel_results_are_bitwise_identical_for_all_dividend_models() {
+        const GROUPS: usize = 10;
+        let group_offsets = (0..=GROUPS)
+            .map(|group| u32::try_from(group * 2).unwrap())
+            .collect::<Vec<_>>();
+        let spots = [100.0; GROUPS];
+        let strikes = [95.0, 105.0].repeat(GROUPS);
+        let maturities = [1.0; GROUPS];
+        let rates = [0.05; GROUPS];
+        let volatilities = [0.25; GROUPS];
+        let yields = [0.02; GROUPS];
+        let cash_offsets = (0..=GROUPS)
+            .map(|group| i64::try_from(group).unwrap())
+            .collect::<Vec<_>>();
+        let cash_times = [0.3].repeat(GROUPS);
+        let cash_amounts = [2.0].repeat(GROUPS);
+        let dividends =
+            RaggedCashDividends::try_new(&cash_offsets, &cash_times, &cash_amounts).unwrap();
+        let pricing_method = method(OriginExercise::Excluded);
+        let serial_executor = CpuExecutor::try_new(1).unwrap();
+        let parallel_executor = CpuExecutor::try_new(4).unwrap();
+
+        for dividend_model in [
+            BatchDividendModel::ContinuousYield {
+                annualized_decimals: &yields,
+            },
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Survivor,
+            },
+            BatchDividendModel::EscrowedCashDividends {
+                schedules: dividends,
+                volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+            },
+        ] {
+            let inputs = GroupedBatchLsmCallInputs::try_new(
+                &group_offsets,
+                &spots,
+                &strikes,
+                &maturities,
+                &rates,
+                &volatilities,
+                dividend_model,
+            )
+            .unwrap();
+            let serial = inputs.price(pricing_method, &serial_executor).unwrap();
+            let parallel = inputs.price(pricing_method, &parallel_executor).unwrap();
+            assert_eq!(parallel, serial);
+            assert_eq!(serial.len(), strikes.len());
+        }
     }
 
     #[test]

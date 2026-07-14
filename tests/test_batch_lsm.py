@@ -23,6 +23,7 @@ from finoptions import (
     LogDiscountCurve,
     Lsm,
     LsmBatchResult,
+    LsmStrikeGroups,
     OriginExercise,
     RaggedCashDividends,
     RandomStream,
@@ -30,6 +31,7 @@ from finoptions import (
     UniformExerciseMesh,
     price_lsm_call,
     price_lsm_call_batch,
+    price_lsm_call_grouped_batch,
 )
 
 _PATHS = 4_096
@@ -112,6 +114,218 @@ def assert_batch_equal(left: LsmBatchResult, right: LsmBatchResult) -> None:
     )
     assert np.array_equal(left.early_exercise_paths, right.early_exercise_paths)
     assert np.array_equal(left.expiry_paths, right.expiry_paths)
+
+
+def assert_batch_row_equal(
+    grouped: LsmBatchResult,
+    grouped_row: int,
+    independent: LsmBatchResult,
+) -> None:
+    """Require one grouped strike to equal a one-row run on its exact group population."""
+    assert independent.rows == 1
+    assert grouped.prices[grouped_row] == independent.prices[0]
+    assert (
+        grouped.sample_standard_deviations[grouped_row] == independent.sample_standard_deviations[0]
+    )
+    assert grouped.standard_errors[grouped_row] == independent.standard_errors[0]
+    assert grouped.origin_decisions_fitted[grouped_row] == independent.origin_decisions_fitted[0]
+    assert grouped.origin_exercised[grouped_row] == independent.origin_exercised[0]
+    assert grouped.regression_nodes[grouped_row] == independent.regression_nodes[0]
+    assert (
+        grouped.no_training_support_nodes[grouped_row] == independent.no_training_support_nodes[0]
+    )
+    assert (
+        grouped.minimum_in_the_money_training_paths[grouped_row]
+        == independent.minimum_in_the_money_training_paths[0]
+    )
+    assert (
+        grouped.maximum_regression_condition_numbers[grouped_row]
+        == independent.maximum_regression_condition_numbers[0]
+    )
+    assert grouped.early_exercise_paths[grouped_row] == independent.early_exercise_paths[0]
+    assert grouped.expiry_paths[grouped_row] == independent.expiry_paths[0]
+
+
+def test_one_contract_groups_match_row_batches_for_every_dividend_boundary_bitwise() -> None:
+    """Python grouped dispatch preserves the accepted row algorithm on identical domains."""
+    inputs = continuous_inputs()
+    schedules = RaggedCashDividends(
+        offsets=np.array([0, 2, 3], dtype=np.int64),
+        times=np.array([0.2, 0.6, 0.4], dtype=np.float64),
+        amounts=np.array([1.0, 1.0, 2.0], dtype=np.float64),
+    )
+    for dividends in (
+        inputs["dividends"],
+        CashDividendBatch(schedules=schedules, policy=DividendPolicy.SURVIVOR),
+        EscrowedCashDividendBatch(
+            schedules=schedules,
+            volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+        ),
+    ):
+        row = price_lsm_call_batch(
+            initial_spots=inputs["initial_spots"],
+            strikes=inputs["strikes"],
+            maturities=inputs["maturities"],
+            rates=inputs["rates"],
+            volatilities=inputs["volatilities"],
+            dividends=dividends,
+            mesh=inputs["mesh"],
+            executor=CpuExecutor(threads=1),
+            method=inputs["method"],
+        )
+        grouped = price_lsm_call_grouped_batch(
+            groups=LsmStrikeGroups(
+                group_offsets=np.array([0, 1, 2], dtype=np.uint32),
+                initial_spots=inputs["initial_spots"],
+                strikes=inputs["strikes"],
+                maturities=inputs["maturities"],
+                rates=inputs["rates"],
+                volatilities=inputs["volatilities"],
+                dividends=dividends,
+            ),
+            mesh=inputs["mesh"],
+            executor=CpuExecutor(threads=1),
+            method=inputs["method"],
+        )
+        assert_batch_equal(grouped, row)
+
+
+def test_every_shared_group_strike_matches_its_independent_same_population_run() -> None:
+    """Path reuse changes cross-strike coupling, never a strike's declared LSM estimator."""
+    spot = np.array([100.0], dtype=np.float64)
+    strikes = np.array([85.0, 100.0, 115.0], dtype=np.float64)
+    maturity = np.array([1.0], dtype=np.float64)
+    rate = np.array([0.03], dtype=np.float64)
+    volatility = np.array([0.25], dtype=np.float64)
+    schedules = RaggedCashDividends(
+        offsets=np.array([0, 2], dtype=np.int64),
+        times=np.array([0.25, 0.75], dtype=np.float64),
+        amounts=np.array([1.0, 1.25], dtype=np.float64),
+    )
+    for dividends in (
+        ContinuousDividendYieldBatch(annualized_decimals=np.array([0.02], dtype=np.float64)),
+        CashDividendBatch(schedules=schedules, policy=DividendPolicy.LIQUIDATOR),
+        EscrowedCashDividendBatch(
+            schedules=schedules,
+            volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+        ),
+    ):
+        grouped = price_lsm_call_grouped_batch(
+            groups=LsmStrikeGroups(
+                group_offsets=np.array([0, 3], dtype=np.uint32),
+                initial_spots=spot,
+                strikes=strikes,
+                maturities=maturity,
+                rates=rate,
+                volatilities=volatility,
+                dividends=dividends,
+            ),
+            mesh=mesh(),
+            executor=CpuExecutor(threads=1),
+            method=method(training_domain=733, evaluation_domain=91_733),
+        )
+        for row, strike in enumerate(strikes):
+            independent = price_lsm_call_batch(
+                initial_spots=spot,
+                strikes=np.array([strike], dtype=np.float64),
+                maturities=maturity,
+                rates=rate,
+                volatilities=volatility,
+                dividends=dividends,
+                mesh=mesh(),
+                executor=CpuExecutor(threads=1),
+                method=method(training_domain=733, evaluation_domain=91_733),
+            )
+            assert_batch_row_equal(grouped, row, independent)
+
+
+def test_grouped_common_random_numbers_are_thread_invariant_and_strike_specific() -> None:
+    """Duplicate strikes agree bitwise while a different strike retains its own fitted policy."""
+    groups = LsmStrikeGroups(
+        group_offsets=np.array([0, 3, 5], dtype=np.uint32),
+        initial_spots=np.array([100.0, 120.0], dtype=np.float64),
+        strikes=np.array([95.0, 100.0, 100.0, 105.0, 105.0], dtype=np.float64),
+        maturities=np.array([1.0, 0.75], dtype=np.float64),
+        rates=np.array([0.05, 0.03], dtype=np.float64),
+        volatilities=np.array([0.25, 0.30], dtype=np.float64),
+        dividends=ContinuousDividendYieldBatch(
+            annualized_decimals=np.array([0.02, 0.01], dtype=np.float64)
+        ),
+    )
+    serial = price_lsm_call_grouped_batch(
+        groups=groups,
+        mesh=mesh(),
+        executor=CpuExecutor(threads=1),
+        method=method(),
+    )
+    parallel = price_lsm_call_grouped_batch(
+        groups=groups,
+        mesh=mesh(),
+        executor=CpuExecutor(threads=4),
+        method=method(),
+    )
+    assert_batch_equal(parallel, serial)
+    assert serial.prices[0] != serial.prices[1]
+    for left, right in ((1, 2), (3, 4)):
+        for values in (
+            serial.prices,
+            serial.sample_standard_deviations,
+            serial.standard_errors,
+            serial.regression_nodes,
+            serial.no_training_support_nodes,
+            serial.minimum_in_the_money_training_paths,
+            serial.maximum_regression_condition_numbers,
+            serial.early_exercise_paths,
+            serial.expiry_paths,
+        ):
+            assert values[left] == values[right]
+
+
+def test_grouped_offsets_and_compact_axes_fail_before_simulation_without_repair() -> None:
+    """The public and native boundaries reject dtype, empty groups, and terminal mismatch."""
+    with pytest.raises(InputError, match="group_offsets must have dtype uint32"):
+        LsmStrikeGroups(
+            group_offsets=cast(
+                "npt.NDArray[np.uint32]",
+                np.array([0, 1], dtype=np.int64),
+            ),
+            initial_spots=np.array([100.0], dtype=np.float64),
+            strikes=np.array([100.0], dtype=np.float64),
+            maturities=np.array([1.0], dtype=np.float64),
+            rates=np.array([0.05], dtype=np.float64),
+            volatilities=np.array([0.25], dtype=np.float64),
+            dividends=ContinuousDividendYieldBatch(
+                annualized_decimals=np.array([0.02], dtype=np.float64)
+            ),
+        )
+
+    def invalid_groups(offsets: list[int]) -> LsmStrikeGroups:
+        return LsmStrikeGroups(
+            group_offsets=np.array(offsets, dtype=np.uint32),
+            initial_spots=np.array([100.0, 120.0], dtype=np.float64),
+            strikes=np.array([95.0, 100.0, 110.0], dtype=np.float64),
+            maturities=np.array([1.0, 0.75], dtype=np.float64),
+            rates=np.array([0.05, 0.03], dtype=np.float64),
+            volatilities=np.array([0.25, 0.30], dtype=np.float64),
+            dividends=ContinuousDividendYieldBatch(
+                annualized_decimals=np.array([0.02, 0.01], dtype=np.float64)
+            ),
+        )
+
+    with pytest.raises(InputError, match="range 0 must be nonempty"):
+        price_lsm_call_grouped_batch(
+            groups=invalid_groups([0, 0, 3]),
+            mesh=mesh(),
+            executor=CpuExecutor(threads=1),
+            method=method(),
+        )
+    with pytest.raises(InputError, match="terminal offset is 2; expected 3"):
+        price_lsm_call_grouped_batch(
+            groups=invalid_groups([0, 1, 2]),
+            mesh=mesh(),
+            executor=CpuExecutor(threads=1),
+            method=method(),
+        )
 
 
 def test_continuous_batch_is_thread_invariant_and_matches_scalar_row_bitwise() -> None:

@@ -9,10 +9,10 @@ use finoptions_core::{
 };
 use finoptions_lsm::{
     BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams,
-    ExerciseTieRule, LsmCallEstimator, OriginExercise, PolynomialDegree, PolynomialRegressionSpec,
-    UniformExerciseMesh,
+    ExerciseTieRule, GroupedBatchLsmCallInputs, LsmCallEstimator, OriginExercise, PolynomialDegree,
+    PolynomialRegressionSpec, UniformExerciseMesh,
 };
-use finoptions_sim::{CpuExecutor, GbmPathPlan, RandomStream};
+use finoptions_sim::{CpuExecutor, CpuMathBackend, GbmPathPlan, RandomStream};
 
 const STEPS: u32 = 150;
 const TRAINING_PATHS: usize = 500;
@@ -101,6 +101,133 @@ impl Workload {
             &self.volatilities,
             BatchDividendModel::CashDividends {
                 schedules: self.dividends(),
+                policy: DividendPolicy::Liquidator,
+            },
+        )
+        .unwrap()
+    }
+}
+
+struct StrikeGroupWorkload {
+    group_offsets: Vec<u32>,
+    group_initial_spots: Vec<f64>,
+    strikes: Vec<f64>,
+    group_maturities: Vec<f64>,
+    group_rates: Vec<f64>,
+    group_volatilities: Vec<f64>,
+    group_dividend_offsets: Vec<i64>,
+    group_dividend_times: Vec<f64>,
+    group_dividend_amounts: Vec<f64>,
+    row_initial_spots: Vec<f64>,
+    row_maturities: Vec<f64>,
+    row_rates: Vec<f64>,
+    row_volatilities: Vec<f64>,
+    row_dividend_offsets: Vec<i64>,
+    row_dividend_times: Vec<f64>,
+    row_dividend_amounts: Vec<f64>,
+}
+
+impl StrikeGroupWorkload {
+    fn new(groups: usize, strikes_per_group: usize) -> Self {
+        let rows = groups * strikes_per_group;
+        let mut workload = Self {
+            group_offsets: Vec::with_capacity(groups + 1),
+            group_initial_spots: Vec::with_capacity(groups),
+            strikes: Vec::with_capacity(rows),
+            group_maturities: Vec::with_capacity(groups),
+            group_rates: Vec::with_capacity(groups),
+            group_volatilities: Vec::with_capacity(groups),
+            group_dividend_offsets: Vec::with_capacity(groups + 1),
+            group_dividend_times: Vec::with_capacity(groups),
+            group_dividend_amounts: Vec::with_capacity(groups),
+            row_initial_spots: Vec::with_capacity(rows),
+            row_maturities: Vec::with_capacity(rows),
+            row_rates: Vec::with_capacity(rows),
+            row_volatilities: Vec::with_capacity(rows),
+            row_dividend_offsets: Vec::with_capacity(rows + 1),
+            row_dividend_times: Vec::with_capacity(rows),
+            row_dividend_amounts: Vec::with_capacity(rows),
+        };
+        workload.group_offsets.push(0);
+        workload.group_dividend_offsets.push(0);
+        workload.row_dividend_offsets.push(0);
+        for group in 0..groups {
+            let bucket = u32::try_from(group % 17).unwrap();
+            let spot = 100.0 + f64::from(bucket);
+            let maturity = 1.0;
+            let rate = 0.03 + f64::from(bucket) * 0.001;
+            let volatility = 0.20 + f64::from(bucket) * 0.005;
+            let cash_amount = 2.0 + f64::from(bucket) * 0.1;
+            workload.group_initial_spots.push(spot);
+            workload.group_maturities.push(maturity);
+            workload.group_rates.push(rate);
+            workload.group_volatilities.push(volatility);
+            workload.group_dividend_times.push(0.5);
+            workload.group_dividend_amounts.push(cash_amount);
+            workload
+                .group_dividend_offsets
+                .push(i64::try_from(group + 1).unwrap());
+            for strike_index in 0..strikes_per_group {
+                let strike_fraction = 0.82 + 0.03 * f64::from(u32::try_from(strike_index).unwrap());
+                workload.strikes.push(spot * strike_fraction);
+                workload.row_initial_spots.push(spot);
+                workload.row_maturities.push(maturity);
+                workload.row_rates.push(rate);
+                workload.row_volatilities.push(volatility);
+                workload.row_dividend_times.push(0.5);
+                workload.row_dividend_amounts.push(cash_amount);
+                workload
+                    .row_dividend_offsets
+                    .push(i64::try_from(workload.strikes.len()).unwrap());
+            }
+            workload
+                .group_offsets
+                .push(u32::try_from(workload.strikes.len()).unwrap());
+        }
+        workload
+    }
+
+    fn rows(&self) -> usize {
+        self.strikes.len()
+    }
+
+    fn grouped_inputs(&self) -> GroupedBatchLsmCallInputs<'_> {
+        let dividends = RaggedCashDividends::try_new(
+            &self.group_dividend_offsets,
+            &self.group_dividend_times,
+            &self.group_dividend_amounts,
+        )
+        .unwrap();
+        GroupedBatchLsmCallInputs::try_new(
+            &self.group_offsets,
+            &self.group_initial_spots,
+            &self.strikes,
+            &self.group_maturities,
+            &self.group_rates,
+            &self.group_volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+            },
+        )
+        .unwrap()
+    }
+
+    fn row_inputs(&self) -> BatchLsmCallInputs<'_> {
+        let dividends = RaggedCashDividends::try_new(
+            &self.row_dividend_offsets,
+            &self.row_dividend_times,
+            &self.row_dividend_amounts,
+        )
+        .unwrap();
+        BatchLsmCallInputs::try_new(
+            &self.row_initial_spots,
+            &self.strikes,
+            &self.row_maturities,
+            &self.row_rates,
+            &self.row_volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
                 policy: DividendPolicy::Liquidator,
             },
         )
@@ -229,6 +356,61 @@ fn benchmark(criterion: &mut Criterion) {
                     });
                 },
             );
+        }
+    }
+    group.finish();
+
+    let mut group = criterion.benchmark_group("project_grouped_strikes_150x500_lsm");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    #[cfg(target_os = "macos")]
+    let backends = [
+        ("rust_std_f64", CpuMathBackend::RustStdF64),
+        (
+            "apple_accelerate_vforce",
+            CpuMathBackend::AppleAccelerateVforce,
+        ),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let backends = [("rust_std_f64", CpuMathBackend::RustStdF64)];
+    for groups in [32, 128] {
+        let workload = StrikeGroupWorkload::new(groups, 7);
+        group.throughput(Throughput::Elements(
+            u64::try_from(workload.rows()).unwrap(),
+        ));
+        for threads in [1, 8] {
+            for &(backend_name, backend) in &backends {
+                let executor = CpuExecutor::try_new_with_math_backend(threads, backend).unwrap();
+                group.bench_with_input(
+                    BenchmarkId::new(format!("grouped_{backend_name}_{threads}t"), groups),
+                    &groups,
+                    |bencher, _| {
+                        bencher.iter(|| {
+                            black_box(
+                                workload
+                                    .grouped_inputs()
+                                    .price(batch_method(), black_box(&executor))
+                                    .unwrap(),
+                            );
+                        });
+                    },
+                );
+                group.bench_with_input(
+                    BenchmarkId::new(format!("row_{backend_name}_{threads}t"), groups),
+                    &groups,
+                    |bencher, _| {
+                        bencher.iter(|| {
+                            black_box(
+                                workload
+                                    .row_inputs()
+                                    .price(batch_method(), black_box(&executor))
+                                    .unwrap(),
+                            );
+                        });
+                    },
+                );
+            }
         }
     }
     group.finish();

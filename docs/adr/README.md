@@ -16,3 +16,4 @@ repository.
 - [ADR 0010: Contract-parallel independent-policy LSM batches](0010-contract-parallel-lsm-batches.md)
 - [ADR 0011: Explicit escrowed cash-dividend approximation](0011-explicit-escrowed-cash-dividends.md)
 - [ADR 0012: Explicit Apple vector-math backend](0012-explicit-apple-vector-math.md)
+- [ADR 0013: Group-addressed strike LSM with shared path populations](0013-group-addressed-strike-lsm.md)

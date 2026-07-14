@@ -133,6 +133,47 @@ class EscrowedCashDividendBatch:
 type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch | EscrowedCashDividendBatch
 
 
+@dataclass(frozen=True, slots=True)
+class LsmStrikeGroups:
+    """Compact exact simulation states with one or more row-ordered strikes per state.
+
+    ``group_offsets`` are contiguous uint32 strike-row boundaries. Spot, maturity, rate,
+    volatility, and dividends have one entry or schedule per simulation group; ``strikes`` has one
+    entry per output contract. Constructing groups is an explicit research-data operation: this
+    type never infers equality, sorts contracts, or collapses rows.
+    """
+
+    group_offsets: UInt32Vector
+    initial_spots: Float64Vector
+    strikes: Float64Vector
+    maturities: Float64Vector
+    rates: Float64Vector
+    volatilities: Float64Vector
+    dividends: BatchDividends
+
+    def __post_init__(self) -> None:
+        """Require directly borrowable compact columns; native pricing revalidates all values."""
+        _validate_vector(self.group_offsets, field="group_offsets", dtype="uint32")
+        for field, values in (
+            ("initial_spots", self.initial_spots),
+            ("strikes", self.strikes),
+            ("maturities", self.maturities),
+            ("rates", self.rates),
+            ("volatilities", self.volatilities),
+        ):
+            _validate_vector(values, field=field, dtype="float64")
+        if type(self.dividends) not in (
+            ContinuousDividendYieldBatch,
+            CashDividendBatch,
+            EscrowedCashDividendBatch,
+        ):
+            msg = (
+                "dividends must be ContinuousDividendYieldBatch, CashDividendBatch, "
+                "or EscrowedCashDividendBatch"
+            )
+            raise InputError(msg)
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class LsmBatchResult:
     """Immutable row-ordered prices, sampling error, policy support, and stopping counts."""
@@ -371,6 +412,106 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
     return result
 
 
+def price_lsm_call_grouped_batch(
+    *,
+    groups: LsmStrikeGroups,
+    mesh: UniformExerciseMesh,
+    executor: CpuExecutor,
+    method: Lsm,
+) -> LsmBatchResult:
+    """Price strike groups while simulating each declared market state exactly once.
+
+    Every strike fits its own stopping policy on the shared group training population and is valued
+    out of sample on the shared, disjoint evaluation population. Sharing random paths across
+    strikes is intentional common-random-number design; it does not share a stopping policy.
+
+    Group columns and result order are borrowed and preserved exactly. The function never infers
+    groups, casts arrays, sorts strikes, repairs offsets, changes regression degree, or falls back
+    after a financial, support, simulation, or numerical failure.
+
+    Raises:
+        InputError: If a runtime type, array layout, compact boundary, financial value, mesh, or
+            group-addressed random interval is invalid.
+        LsmError: If allocation, simulation, regression, policy support, or evaluation fails.
+
+    """
+    if type(groups) is not LsmStrikeGroups:
+        msg = "groups must be LsmStrikeGroups"
+        raise InputError(msg)
+    if type(mesh) is not UniformExerciseMesh:
+        msg = "mesh must be UniformExerciseMesh"
+        raise InputError(msg)
+    if type(executor) is not CpuExecutor:
+        msg = "executor must be CpuExecutor"
+        raise InputError(msg)
+    if type(method) is not Lsm:
+        msg = "method must be Lsm"
+        raise InputError(msg)
+    if method.evaluation_paths < _MIN_EVALUATION_PATHS:
+        msg = "grouped batched LSM requires at least two independent evaluation paths"
+        raise InputError(msg)
+
+    common = (
+        groups.group_offsets,
+        groups.initial_spots,
+        groups.strikes,
+        groups.maturities,
+        groups.rates,
+        groups.volatilities,
+    )
+    method_arguments = (
+        mesh.base_intervals,
+        mesh.origin_exercise.value,
+        executor._handle,  # noqa: SLF001 - facade owns the private native resource
+        method.training_paths,
+        method.evaluation_paths,
+        method.training_stream.seed,
+        method.training_stream.domain,
+        method.evaluation_stream.seed,
+        method.evaluation_stream.domain,
+        method.polynomial_degree,
+        method.rank_tolerance,
+        method.condition_limit,
+        method.tie_rule.value,
+    )
+    dividends = groups.dividends
+    if type(dividends) is ContinuousDividendYieldBatch:
+        raw = _native.price_lsm_call_grouped_batch_continuous_yield_f64(
+            *common,
+            dividends.annualized_decimals,
+            *method_arguments,
+        )
+    elif type(dividends) is CashDividendBatch:
+        raw = _native.price_lsm_call_grouped_batch_cash_dividends_f64(
+            *common,
+            dividends.schedules.offsets,
+            dividends.schedules.times,
+            dividends.schedules.amounts,
+            dividends.policy.value,
+            *method_arguments,
+        )
+    elif type(dividends) is EscrowedCashDividendBatch:
+        raw = _native.price_lsm_call_grouped_batch_escrowed_cash_dividends_f64(
+            *common,
+            dividends.schedules.offsets,
+            dividends.schedules.times,
+            dividends.schedules.amounts,
+            dividends.volatility_convention.value,
+            *method_arguments,
+        )
+    else:
+        msg = "group dividends changed type after request validation"
+        raise LsmError(msg)
+    result = _freeze_native_result(raw)
+    stopping_paths = result.early_exercise_paths.astype(np.uint64) + result.expiry_paths.astype(
+        np.uint64
+    )
+    if np.any(stopping_paths != method.evaluation_paths):
+        msg = "native grouped LSM stopping counts do not partition evaluation paths"
+        raise LsmError(msg)
+    return result
+
+
 __all__ = [
     "BatchDividends",
     "CashDividendBatch",
@@ -378,7 +519,9 @@ __all__ = [
     "EscrowedCashDividendBatch",
     "EscrowedVolatilityConvention",
     "LsmBatchResult",
+    "LsmStrikeGroups",
     "OriginExercise",
     "UniformExerciseMesh",
     "price_lsm_call_batch",
+    "price_lsm_call_grouped_batch",
 ]

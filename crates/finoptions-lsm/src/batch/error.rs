@@ -25,6 +25,44 @@ pub enum BatchLsmError {
         observed: usize,
     },
 
+    /// Group offsets do not contain one boundary per simulation group plus the terminal row.
+    #[error("LSM grouped batch offsets contain {observed} values; expected {expected}")]
+    GroupOffsetCountMismatch {
+        /// Required number of offset values.
+        expected: usize,
+        /// Supplied number of offset values.
+        observed: usize,
+    },
+
+    /// The first grouped contract offset is not zero.
+    #[error("LSM grouped batch offsets must start at zero; observed {observed}")]
+    GroupOffsetsDoNotStartAtZero {
+        /// Supplied first boundary.
+        observed: u32,
+    },
+
+    /// A grouped batch contains an empty or reversed contract range.
+    #[error(
+        "LSM grouped batch range {group} must be nonempty and increasing; observed [{start}, {end})"
+    )]
+    InvalidGroupRange {
+        /// Zero-based simulation group.
+        group: usize,
+        /// Inclusive supplied row boundary.
+        start: u32,
+        /// Exclusive supplied row boundary.
+        end: u32,
+    },
+
+    /// The final grouped offset does not equal the strike-row count.
+    #[error("LSM grouped batch terminal offset is {observed}; expected {expected} contract rows")]
+    GroupOffsetEndMismatch {
+        /// Exact strike-row count.
+        expected: usize,
+        /// Supplied terminal boundary.
+        observed: u32,
+    },
+
     /// A per-contract scalar lies outside its declared financial domain.
     #[error("LSM batch field {field} is invalid at row {row}: observed {observed:?}")]
     InvalidRowValue {

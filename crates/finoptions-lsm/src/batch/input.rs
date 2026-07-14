@@ -421,6 +421,184 @@ impl<'a> BatchLsmCallInputs<'a> {
     }
 }
 
+/// Compact strike groups whose contracts share one exact simulated path population.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupedBatchLsmCallInputs<'a> {
+    pub(super) group_offsets: &'a [u32],
+    pub(super) initial_spots: &'a [f64],
+    pub(super) strikes: &'a [f64],
+    pub(super) maturities: &'a [f64],
+    pub(super) constant_continuously_compounded_rates: &'a [f64],
+    pub(super) constant_volatilities: &'a [f64],
+    pub(super) dividend_model: BatchDividendModel<'a>,
+}
+
+impl<'a> GroupedBatchLsmCallInputs<'a> {
+    /// Validates group-level path inputs, row-level strikes, and exact contiguous boundaries.
+    ///
+    /// Each group owns one spot, maturity, rate, volatility, and dividend representation. Every
+    /// strike in `group_offsets[group]..group_offsets[group + 1]` is fitted and independently
+    /// evaluated against the same group-addressed training and evaluation path populations. Empty
+    /// groups and inferred or repaired boundaries are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first scalar, schedule, or boundary violation. Cash events must be unique and
+    /// strictly before their group's maturity. No contract is moved between groups.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        group_offsets: &'a [u32],
+        initial_spots: &'a [f64],
+        strikes: &'a [f64],
+        maturities: &'a [f64],
+        constant_continuously_compounded_rates: &'a [f64],
+        constant_volatilities: &'a [f64],
+        dividend_model: BatchDividendModel<'a>,
+    ) -> Result<Self, BatchLsmError> {
+        let groups = initial_spots.len();
+        if groups == 0 || strikes.is_empty() {
+            return Err(BatchLsmError::EmptyBatch);
+        }
+        validate_length("maturities", groups, maturities.len())?;
+        validate_length(
+            "constant_continuously_compounded_rates",
+            groups,
+            constant_continuously_compounded_rates.len(),
+        )?;
+        validate_length("constant_volatilities", groups, constant_volatilities.len())?;
+        validate_length("dividend_model", groups, dividend_model.rows())?;
+        validate_group_offsets(group_offsets, groups, strikes.len())?;
+
+        for (row, &strike) in strikes.iter().enumerate() {
+            validate_positive("strikes", row, strike)?;
+        }
+        for group in 0..groups {
+            validate_nonnegative("initial_spots", group, initial_spots[group])?;
+            validate_positive("maturities", group, maturities[group])?;
+            validate_finite(
+                "constant_continuously_compounded_rates",
+                group,
+                constant_continuously_compounded_rates[group],
+            )?;
+            validate_positive("constant_volatilities", group, constant_volatilities[group])?;
+            match dividend_model {
+                BatchDividendModel::ContinuousYield {
+                    annualized_decimals,
+                } => validate_nonnegative(
+                    "continuous_dividend_yields",
+                    group,
+                    annualized_decimals[group],
+                )?,
+                BatchDividendModel::CashDividends { schedules, .. }
+                | BatchDividendModel::EscrowedCashDividends { schedules, .. } => {
+                    let schedule = schedules
+                        .row(group)
+                        .ok_or(BatchLsmError::RowCountMismatch {
+                            field: "dividend_model",
+                            expected: groups,
+                            observed: schedules.rows(),
+                        })?;
+                    for (event, &time) in schedule.times().iter().enumerate() {
+                        if time >= maturities[group] {
+                            return Err(BatchLsmError::CashDividendOutsideContract {
+                                row: group,
+                                event,
+                                time,
+                                maturity: maturities[group],
+                            });
+                        }
+                        if event > 0 && schedule.times()[event - 1].to_bits() == time.to_bits() {
+                            return Err(BatchLsmError::DuplicateCashDividendTime {
+                                row: group,
+                                event,
+                                time,
+                            });
+                        }
+                    }
+                    if let BatchDividendModel::EscrowedCashDividends {
+                        volatility_convention,
+                        ..
+                    } = dividend_model
+                    {
+                        validate_escrowed_row(
+                            group,
+                            initial_spots[group],
+                            constant_continuously_compounded_rates[group],
+                            constant_volatilities[group],
+                            schedule,
+                            volatility_convention,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            group_offsets,
+            initial_spots,
+            strikes,
+            maturities,
+            constant_continuously_compounded_rates,
+            constant_volatilities,
+            dividend_model,
+        })
+    }
+
+    /// Returns the number of independent simulated path populations.
+    #[must_use]
+    pub const fn groups(self) -> usize {
+        self.initial_spots.len()
+    }
+
+    /// Returns the number of strike-specific contracts.
+    #[must_use]
+    pub const fn rows(self) -> usize {
+        self.strikes.len()
+    }
+
+    pub(super) fn group_range(self, group: usize) -> std::ops::Range<usize> {
+        let start = usize::try_from(self.group_offsets[group]).expect("validated group offset");
+        let end = usize::try_from(self.group_offsets[group + 1]).expect("validated group offset");
+        start..end
+    }
+}
+
+fn validate_group_offsets(
+    offsets: &[u32],
+    groups: usize,
+    rows: usize,
+) -> Result<(), BatchLsmError> {
+    // A non-ZST `f64` slice cannot have `usize::MAX` elements, so this addition cannot overflow.
+    let expected = groups + 1;
+    if offsets.len() != expected {
+        return Err(BatchLsmError::GroupOffsetCountMismatch {
+            expected,
+            observed: offsets.len(),
+        });
+    }
+    if offsets[0] != 0 {
+        return Err(BatchLsmError::GroupOffsetsDoNotStartAtZero {
+            observed: offsets[0],
+        });
+    }
+    for (group, window) in offsets.windows(2).enumerate() {
+        if window[0] >= window[1] {
+            return Err(BatchLsmError::InvalidGroupRange {
+                group,
+                start: window[0],
+                end: window[1],
+            });
+        }
+    }
+    let terminal = offsets[offsets.len() - 1];
+    if usize::try_from(terminal).ok() != Some(rows) {
+        return Err(BatchLsmError::GroupOffsetEndMismatch {
+            expected: rows,
+            observed: terminal,
+        });
+    }
+    Ok(())
+}
+
 fn validate_escrowed_row(
     row: usize,
     initial_spot: f64,

@@ -196,6 +196,14 @@ meaning is inferred. Parallel and serial execution of an identical request are b
 while independent numerical methods are validated by financial identities, bounds, convergence,
 and justified tolerances rather than forced equality.
 
+When several strikes share one exact simulated state, use `LsmStrikeGroups` and
+`price_lsm_call_grouped_batch`. Group offsets and compact state columns are explicit NumPy buffers;
+the engine never guesses groups from approximate values or shares a strike-specific stopping
+policy. Each group simulates one training/evaluation path pair, while every strike fits and evaluates
+its own policy on those common random numbers. The architecture and measured project-shaped speedup
+are recorded in [ADR 0013](docs/adr/0013-group-addressed-strike-lsm.md) and the
+[grouped-strike performance checkpoint](docs/performance/2026-07-14-grouped-strike-lsm.md).
+
 The current project-shaped CPU and memory measurements are recorded as a reproducible
 [performance checkpoint](docs/performance/2026-07-14-lsm-batch.md).
 
