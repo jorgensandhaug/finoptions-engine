@@ -6,11 +6,23 @@ use rayon::prelude::*;
 
 use super::{GbmPathPlan, SimulatedPaths};
 use crate::random::{NormalError, PhiloxPathStream, sample_standard_normal};
-use crate::{RandomStream, SimulationError};
+use crate::{CpuMathBackend, RandomStream, SimulationError};
 
 // Keeps contract-parallel worker scratch cache-sized and independent of batch rows. Blocking only
 // changes transpose storage: random addresses and arithmetic within every path remain identical.
 const SERIAL_PATH_BLOCK: usize = 32;
+// Representative 150-step LSM batches reached the vector-throughput plateau at 64 paths while
+// keeping one path-major observation tile substantially smaller than the 128/256-path candidates.
+const VECTOR_PATH_BLOCK: usize = 64;
+
+#[derive(Default)]
+struct SeededVectorWorkspace {
+    generators: Vec<PhiloxPathStream>,
+    spots: Vec<f64>,
+    normals: Vec<f64>,
+    exponents: Vec<f64>,
+    growth: Vec<f64>,
+}
 
 impl GbmPathPlan {
     /// Generates standard-normal variates and evolves paths without a dense shock matrix.
@@ -47,6 +59,74 @@ impl GbmPathPlan {
                     path_observations,
                 )?;
             }
+            for observation in 0..observations {
+                let output_start = observation * paths + block_start;
+                let output_row = &mut values[output_start..output_start + block_paths];
+                for (local_path, output) in output_row.iter_mut().enumerate() {
+                    *output = block_values[local_path * observations + observation];
+                }
+            }
+        }
+        Ok(SimulatedPaths {
+            plan: self.clone(),
+            random_stream: Some(stream),
+            initial_spot,
+            paths,
+            values,
+        })
+    }
+
+    /// Generates serial seeded paths with one explicit GBM exponential implementation.
+    ///
+    /// The scalar backend preserves the path-local reference kernel bit for bit. Vector backends
+    /// preserve the Philox stream assigned to every path but evaluate transition exponentials in
+    /// fixed path blocks, so their floating-point results are backend-specific by design.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed input, random-generation, backend, dividend, or transition failure. The
+    /// named backend is never replaced.
+    pub fn simulate_seeded_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => self.simulate_seeded(initial_spot, paths, stream),
+            CpuMathBackend::AppleAccelerateVforce => {
+                self.simulate_seeded_vector_exp(math_backend, initial_spot, paths, stream)
+            }
+        }
+    }
+
+    fn simulate_seeded_vector_exp(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let (normal_budget, output_values) = self.validate_seeded(initial_spot, paths)?;
+        let observations = self.observation_nodes.len();
+        let block_capacity = paths.min(VECTOR_PATH_BLOCK);
+        let mut block = vec![0.0; observations * block_capacity];
+        let mut values = vec![0.0; output_values];
+        let mut workspace = SeededVectorWorkspace::default();
+        for block_start in (0..paths).step_by(VECTOR_PATH_BLOCK) {
+            let block_paths = (paths - block_start).min(VECTOR_PATH_BLOCK);
+            let block_values = &mut block[..observations * block_paths];
+            self.simulate_seeded_vector_block(
+                math_backend,
+                initial_spot,
+                block_start,
+                block_paths,
+                normal_budget,
+                stream,
+                block_values,
+                &mut workspace,
+            )?;
             for observation in 0..observations {
                 let output_start = observation * paths + block_start;
                 let output_row = &mut values[output_start..output_start + block_paths];
@@ -113,6 +193,189 @@ impl GbmPathPlan {
             paths,
             values,
         })
+    }
+
+    pub(crate) fn simulate_seeded_parallel_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => {
+                self.simulate_seeded_parallel(initial_spot, paths, stream)
+            }
+            CpuMathBackend::AppleAccelerateVforce => {
+                self.simulate_seeded_vector_exp_parallel(math_backend, initial_spot, paths, stream)
+            }
+        }
+    }
+
+    fn simulate_seeded_vector_exp_parallel(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let (normal_budget, output_values) = self.validate_seeded(initial_spot, paths)?;
+        let observations = self.observation_nodes.len();
+        let block_values = observations * VECTOR_PATH_BLOCK;
+        let mut path_major = vec![0.0; output_values];
+        let first_failed_block = AtomicUsize::new(usize::MAX);
+        path_major
+            .par_chunks_mut(block_values)
+            .enumerate()
+            .for_each_init(
+                SeededVectorWorkspace::default,
+                |workspace, (block_index, output)| {
+                    let block_start = block_index * VECTOR_PATH_BLOCK;
+                    if block_start > first_failed_block.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let block_paths = output.len() / observations;
+                    if self
+                        .simulate_seeded_vector_block(
+                            math_backend,
+                            initial_spot,
+                            block_start,
+                            block_paths,
+                            normal_budget,
+                            stream,
+                            output,
+                            workspace,
+                        )
+                        .is_err()
+                    {
+                        first_failed_block.fetch_min(block_start, Ordering::Relaxed);
+                    }
+                },
+            );
+
+        let failed_block = first_failed_block.load(Ordering::Relaxed);
+        if failed_block != usize::MAX {
+            let block_paths = (paths - failed_block).min(VECTOR_PATH_BLOCK);
+            let mut diagnostic = vec![0.0; observations * block_paths];
+            let mut workspace = SeededVectorWorkspace::default();
+            return match self.simulate_seeded_vector_block(
+                math_backend,
+                initial_spot,
+                failed_block,
+                block_paths,
+                normal_budget,
+                stream,
+                &mut diagnostic,
+                &mut workspace,
+            ) {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    Err(SimulationError::ParallelFailureReplayMismatch { path: failed_block })
+                }
+            };
+        }
+
+        let values = self.transpose_seeded_parallel(&path_major, paths);
+        Ok(SimulatedPaths {
+            plan: self.clone(),
+            random_stream: Some(stream),
+            initial_spot,
+            paths,
+            values,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn simulate_seeded_vector_block(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        block_start: usize,
+        block_paths: usize,
+        normal_budget: u32,
+        stream: RandomStream,
+        output: &mut [f64],
+        workspace: &mut SeededVectorWorkspace,
+    ) -> Result<(), SimulationError> {
+        let observations = self.observation_nodes.len();
+        debug_assert_eq!(output.len(), observations * block_paths);
+        workspace.generators.clear();
+        for path in block_start..block_start + block_paths {
+            let path_id =
+                u32::try_from(path).map_err(|_| SimulationError::RandomPathNamespaceOverflow {
+                    paths: path.saturating_add(1),
+                    maximum: u32::MAX,
+                })?;
+            workspace.generators.push(PhiloxPathStream::new(
+                stream.seed(),
+                stream.domain(),
+                path_id,
+                normal_budget,
+            ));
+        }
+        workspace.spots.resize(block_paths, initial_spot);
+        workspace.spots.fill(initial_spot);
+        workspace.normals.resize(block_paths, 0.0);
+        workspace.exponents.resize(block_paths, 0.0);
+        workspace.growth.resize(block_paths, 0.0);
+        let mut observation = 0;
+        if self.observation_nodes[0].get() == 0 {
+            for local_path in 0..block_paths {
+                output[local_path * observations] = initial_spot;
+            }
+            observation = 1;
+        }
+
+        for (interval, &step) in self.steps.iter().enumerate() {
+            for local_path in 0..block_paths {
+                let path = block_start + local_path;
+                let normal = sample_standard_normal(&mut workspace.generators[local_path])
+                    .map_err(|error| match error {
+                        NormalError::BudgetExhausted => {
+                            SimulationError::RandomNormalBudgetExhausted { interval, path }
+                        }
+                        NormalError::RejectionLimit => {
+                            SimulationError::RandomNormalRejectionLimit { interval, path }
+                        }
+                    })?;
+                workspace.normals[local_path] = normal;
+                workspace.exponents[local_path] = if workspace.spots[local_path] == 0.0 {
+                    0.0
+                } else {
+                    step.diffusion().mul_add(normal, step.log_drift())
+                };
+            }
+            math_backend.exp_f64(&workspace.exponents, &mut workspace.growth)?;
+            for local_path in 0..block_paths {
+                let before = workspace.spots[local_path];
+                let next = before * workspace.growth[local_path];
+                if !next.is_finite() {
+                    return Err(SimulationError::NonFinitePathTransition {
+                        from: step.from().get(),
+                        to: step.to().get(),
+                        path: block_start + local_path,
+                        spot: before,
+                        normal: workspace.normals[local_path],
+                    });
+                }
+                workspace.spots[local_path] = next;
+            }
+
+            let node = step.to();
+            if self.observation_nodes[observation] == node {
+                for (local_path, &spot) in workspace.spots.iter().enumerate() {
+                    output[local_path * observations + observation] = spot;
+                }
+                observation += 1;
+            }
+            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
+                for spot in &mut workspace.spots {
+                    *spot = dividend.apply(self.dividend_policy, *spot)?;
+                }
+            }
+        }
+        debug_assert_eq!(observation, observations);
+        Ok(())
     }
 
     fn validate_seeded(
@@ -274,6 +537,58 @@ mod tests {
             let larger_row = &larger.as_slice()[row * 263..row * 263 + 257];
             assert_eq!(bits(serial_row), bits(larger_row));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_vector_backend_is_thread_invariant_and_close_to_the_scalar_reference() {
+        let plan = plan();
+        let stream = RandomStream::new(7, 11);
+        let scalar = plan.simulate_seeded(100.0, 257, stream).unwrap();
+        let serial_executor =
+            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerateVforce)
+                .unwrap();
+        let parallel_executor =
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
+                .unwrap();
+        let apple_serial = plan
+            .simulate_seeded_with(&serial_executor, 100.0, 257, stream)
+            .unwrap();
+        let apple_parallel = plan
+            .simulate_seeded_with(&parallel_executor, 100.0, 257, stream)
+            .unwrap();
+        assert_eq!(
+            bits(apple_serial.as_slice()),
+            bits(apple_parallel.as_slice())
+        );
+        for (&reference, &observed) in scalar.as_slice().iter().zip(apple_serial.as_slice()) {
+            let scale = reference.abs().max(observed.abs()).max(1.0);
+            assert!((reference - observed).abs() <= 16.0 * f64::EPSILON * scale);
+        }
+
+        let larger = plan
+            .simulate_seeded_with(&parallel_executor, 100.0, 263, stream)
+            .unwrap();
+        for row in 0..plan.observation_nodes.len() {
+            let serial_row = &apple_serial.as_slice()[row * 257..(row + 1) * 257];
+            let larger_row = &larger.as_slice()[row * 263..row * 263 + 257];
+            assert_eq!(bits(serial_row), bits(larger_row));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_vector_backend_reports_transition_failure_without_scalar_substitution() {
+        let executor =
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
+                .unwrap();
+        let error = plan()
+            .simulate_seeded_with(&executor, f64::MAX, 257, RandomStream::new(7, 11))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SimulationError::NonFinitePathTransition { path: 0, .. }
+        ));
     }
 
     #[test]

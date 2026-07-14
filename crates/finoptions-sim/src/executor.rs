@@ -18,9 +18,10 @@ impl GbmPathPlan {
         paths: usize,
         normals: &[f64],
     ) -> Result<SimulatedPaths, SimulationError> {
+        let math_backend = executor.math_backend();
         executor.dispatch(
-            || self.simulate(initial_spot, paths, normals),
-            || self.simulate_parallel(initial_spot, paths, normals),
+            || self.simulate_with_math_backend(math_backend, initial_spot, paths, normals),
+            || self.simulate_parallel_with_math_backend(math_backend, initial_spot, paths, normals),
         )
     }
 
@@ -37,9 +38,17 @@ impl GbmPathPlan {
         paths: usize,
         stream: RandomStream,
     ) -> Result<SimulatedPaths, SimulationError> {
+        let math_backend = executor.math_backend();
         executor.dispatch(
-            || self.simulate_seeded(initial_spot, paths, stream),
-            || self.simulate_seeded_parallel(initial_spot, paths, stream),
+            || self.simulate_seeded_with_math_backend(math_backend, initial_spot, paths, stream),
+            || {
+                self.simulate_seeded_parallel_with_math_backend(
+                    math_backend,
+                    initial_spot,
+                    paths,
+                    stream,
+                )
+            },
         )
     }
 }
@@ -58,9 +67,10 @@ impl EscrowedGbmPathPlan {
         paths: usize,
         normals: &[f64],
     ) -> Result<SimulatedPaths, SimulationError> {
+        let math_backend = executor.math_backend();
         executor.dispatch(
-            || self.simulate(initial_spot, paths, normals),
-            || self.simulate_parallel(initial_spot, paths, normals),
+            || self.simulate_with_math_backend(math_backend, initial_spot, paths, normals),
+            || self.simulate_parallel_with_math_backend(math_backend, initial_spot, paths, normals),
         )
     }
 
@@ -77,9 +87,17 @@ impl EscrowedGbmPathPlan {
         paths: usize,
         stream: RandomStream,
     ) -> Result<SimulatedPaths, SimulationError> {
+        let math_backend = executor.math_backend();
         executor.dispatch(
-            || self.simulate_seeded(initial_spot, paths, stream),
-            || self.simulate_seeded_parallel(initial_spot, paths, stream),
+            || self.simulate_seeded_with_math_backend(math_backend, initial_spot, paths, stream),
+            || {
+                self.simulate_seeded_parallel_with_math_backend(
+                    math_backend,
+                    initial_spot,
+                    paths,
+                    stream,
+                )
+            },
         )
     }
 }

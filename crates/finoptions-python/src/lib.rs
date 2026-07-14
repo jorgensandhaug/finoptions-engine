@@ -22,7 +22,10 @@ use finoptions_lsm::{
     PolynomialRegressionSpec as CorePolynomialRegressionSpec,
     UniformExerciseMesh as CoreUniformExerciseMesh,
 };
-use finoptions_runtime::{CpuExecutor as CoreCpuExecutor, ExecutionError as CoreExecutionError};
+use finoptions_runtime::{
+    CpuExecutor as CoreCpuExecutor, CpuMathBackend as CoreCpuMathBackend,
+    ExecutionError as CoreExecutionError,
+};
 use finoptions_sim::{
     GbmPathPlan, RandomStream as CoreRandomStream, SimulatedPaths,
     SimulationError as CoreSimulationError,
@@ -50,8 +53,9 @@ struct NativeCpuExecutor {
 #[pymethods]
 impl NativeCpuExecutor {
     #[new]
-    fn new(threads: usize) -> PyResult<Self> {
-        CoreCpuExecutor::try_new(threads)
+    #[pyo3(signature = (threads, math_backend = "rust_std_f64"))]
+    fn new(threads: usize, math_backend: &str) -> PyResult<Self> {
+        CoreCpuExecutor::try_new_with_math_backend(threads, parse_cpu_math_backend(math_backend)?)
             .map(|inner| Self { inner })
             .map_err(CoreExecutionError::into_py_execution_error)
     }
@@ -59,6 +63,21 @@ impl NativeCpuExecutor {
     #[getter]
     fn threads(&self) -> usize {
         self.inner.threads()
+    }
+
+    #[getter]
+    fn math_backend(&self) -> &'static str {
+        self.inner.math_backend().as_str()
+    }
+}
+
+fn parse_cpu_math_backend(value: &str) -> PyResult<CoreCpuMathBackend> {
+    match value {
+        "rust_std_f64" => Ok(CoreCpuMathBackend::RustStdF64),
+        "apple_accelerate_vforce" => Ok(CoreCpuMathBackend::AppleAccelerateVforce),
+        _ => Err(InputError::new_err(format!(
+            "CPU math backend must be 'rust_std_f64' or 'apple_accelerate_vforce'; observed {value:?}"
+        ))),
     }
 }
 
@@ -120,6 +139,7 @@ impl IntoPySimulationError for CoreSimulationError {
         match self {
             CoreSimulationError::NonFiniteTransition { .. }
             | CoreSimulationError::NonFinitePathTransition { .. }
+            | CoreSimulationError::CpuMath { .. }
             | CoreSimulationError::RandomNormalBudgetExhausted { .. }
             | CoreSimulationError::RandomNormalRejectionLimit { .. }
             | CoreSimulationError::ParallelFailureReplayMismatch { .. } => {

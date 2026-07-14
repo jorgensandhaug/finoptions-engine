@@ -1,7 +1,8 @@
 # finoptions-engine
 
 Private pre-release repository for a high-performance, financially explicit options research
-engine. It presents one small typed Python package backed by safe, dependency-isolated Rust crates.
+engine. It presents one small typed Python package backed by dependency-isolated Rust crates. Unsafe
+code is confined to one audited Apple Accelerate FFI wrapper; every public interface remains safe.
 
 The first supported slice is deliberately narrow: event-aligned deterministic cash dividends,
 node-aligned deterministic discount factors and cumulative continuous proportional-dividend
@@ -58,6 +59,7 @@ Execution resources are equally explicit and reusable:
 from finoptions import (
     ConstantVolatility,
     CpuExecutor,
+    CpuMathBackend,
     DividendPolicy,
     RandomStream,
     simulate_gbm_seeded,
@@ -70,7 +72,7 @@ paths = simulate_gbm_seeded(
     dividend_yield_curve=dividend_yield_curve,
     volatility=ConstantVolatility(0.20),
     dividend_policy=DividendPolicy.LIQUIDATOR,
-    executor=CpuExecutor(threads=4),
+    executor=CpuExecutor(threads=4, math_backend=CpuMathBackend.RUST_STD_F64),
     paths=100_000,
     random_stream=RandomStream(seed=7, domain=1),
 )
@@ -81,6 +83,11 @@ normal matrix. Seed, domain, and path index define stream identity; use distinct
 sets that must be independent. The explicit-normal `simulate_gbm` route remains available for
 audits and externally generated variance-reduction designs. A dedicated executor never falls back
 to the global thread pool or another backend.
+
+`CpuExecutor` defaults to the portable `CpuMathBackend.RUST_STD_F64`. On macOS, callers may request
+`CpuMathBackend.APPLE_ACCELERATE_VFORCE` explicitly; unsupported platforms fail during executor
+construction. The selected backend is inspectable and belongs in every reproducible execution
+manifest because vector and scalar transcendental implementations need not return identical bits.
 
 The same executor builds model inputs without storing a second padded dataset:
 

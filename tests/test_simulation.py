@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from itertools import pairwise
 from math import erfc, exp, sqrt
 from typing import cast
@@ -12,9 +13,11 @@ from finoptions import (
     CashDividend,
     ConstantVolatility,
     CpuExecutor,
+    CpuMathBackend,
     CumulativeDividendYieldCurve,
     DividendPolicy,
     EventSchedule,
+    ExecutionError,
     GbmPaths,
     InputError,
     LogDiscountCurve,
@@ -208,6 +211,85 @@ def test_executor_and_parallel_failure_reporting_are_strict_and_deterministic() 
             executor=CpuExecutor(threads=2),
             normals=overflow,
         )
+
+
+def test_cpu_math_backend_is_explicit_strict_and_platform_checked() -> None:
+    """The numerical backend is typed, inspectable, and never silently substituted."""
+    scalar = CpuExecutor(threads=1, math_backend=CpuMathBackend.RUST_STD_F64)
+    assert scalar.math_backend is CpuMathBackend.RUST_STD_F64
+    with pytest.raises(InputError, match="must be CpuMathBackend"):
+        CpuExecutor(threads=1, math_backend=cast("CpuMathBackend", "rust_std_f64"))
+
+    if sys.platform != "darwin":
+        with pytest.raises(ExecutionError, match="unavailable"):
+            CpuExecutor(
+                threads=1,
+                math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+            )
+        return
+
+    schedule, curve, volatility = inputs()
+    normals = np.ascontiguousarray(
+        np.random.default_rng(19).standard_normal((3, 257)),
+        dtype=np.float64,
+    )
+    external_common = {
+        "initial_spot": 100.0,
+        "schedule": schedule,
+        "curve": curve,
+        "dividend_yield_curve": zero_yield(schedule),
+        "volatility": volatility,
+        "dividend_policy": DividendPolicy.LIQUIDATOR,
+        "normals": normals,
+    }
+    external_scalar = simulate_gbm(**external_common, executor=scalar)
+    external_apple_serial = simulate_gbm(
+        **external_common,
+        executor=CpuExecutor(
+            threads=1,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+        ),
+    )
+    external_apple_parallel = simulate_gbm(
+        **external_common,
+        executor=CpuExecutor(
+            threads=4,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+        ),
+    )
+    assert np.array_equal(external_apple_serial.states, external_apple_parallel.states)
+    np.testing.assert_allclose(
+        external_apple_serial.states,
+        external_scalar.states,
+        rtol=4e-15,
+        atol=0.0,
+    )
+
+    common = {
+        "initial_spot": 100.0,
+        "schedule": schedule,
+        "curve": curve,
+        "dividend_yield_curve": zero_yield(schedule),
+        "volatility": volatility,
+        "dividend_policy": DividendPolicy.LIQUIDATOR,
+        "paths": 257,
+        "random_stream": RandomStream(seed=7, domain=11),
+    }
+    serial = simulate_gbm_seeded(
+        **common,
+        executor=CpuExecutor(
+            threads=1,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+        ),
+    )
+    parallel = simulate_gbm_seeded(
+        **common,
+        executor=CpuExecutor(
+            threads=4,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+        ),
+    )
+    assert np.array_equal(serial.states, parallel.states)
 
 
 def test_seeded_paths_preserve_stream_identity_across_workers_and_batch_sizes() -> None:

@@ -11,7 +11,7 @@ use finoptions_core::{
 };
 use rayon::prelude::*;
 
-use crate::{GbmStep, RandomStream, SimulationError};
+use crate::{CpuMathBackend, GbmStep, RandomStream, SimulationError};
 
 /// Immutable plan for GBM paths observed immediately before exercise/expiry decisions.
 #[derive(Clone, Debug, PartialEq)]
@@ -162,6 +162,30 @@ impl GbmPathPlan {
         })
     }
 
+    /// Simulates external shocks with one explicitly named GBM exponential implementation.
+    ///
+    /// This serial entry point exists for outer-parallel callers such as contract batches. The
+    /// backend is never inferred or replaced. [`CpuMathBackend::RustStdF64`] preserves the scalar
+    /// kernel, while vector backends use an interval-major vector kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed shape, input, backend, dividend, or non-finite transition failure.
+    pub fn simulate_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => self.simulate(initial_spot, paths, normals),
+            CpuMathBackend::AppleAccelerateVforce => {
+                self.simulate_vector_exp(math_backend, initial_spot, paths, normals, false)
+            }
+        }
+    }
+
     pub(crate) fn simulate_parallel(
         &self,
         initial_spot: f64,
@@ -195,6 +219,150 @@ impl GbmPathPlan {
             paths,
             values,
         })
+    }
+
+    pub(crate) fn simulate_parallel_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => self.simulate_parallel(initial_spot, paths, normals),
+            CpuMathBackend::AppleAccelerateVforce => {
+                self.simulate_vector_exp(math_backend, initial_spot, paths, normals, true)
+            }
+        }
+    }
+
+    fn simulate_vector_exp(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+        parallel: bool,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let normal_values = self.required_normal_values(paths)?;
+        if normals.len() != normal_values {
+            return Err(SimulationError::BufferLengthMismatch {
+                buffer: "normal",
+                expected: normal_values,
+                observed: normals.len(),
+            });
+        }
+        let output_values = self.required_output_values(paths)?;
+        let mut current = vec![0.0; paths];
+        let mut values = vec![0.0; output_values];
+        self.validate_execution(initial_spot, paths, normals, &current, &values)?;
+        current.fill(initial_spot);
+        let mut exponents = vec![0.0; paths];
+        let mut growth = vec![0.0; paths];
+        let mut observation_index = 0;
+        if self.observation_nodes[0].get() == 0 {
+            values[..paths].copy_from_slice(&current);
+            observation_index += 1;
+        }
+
+        for (interval, &step) in self.steps.iter().enumerate() {
+            let normal_start = interval * paths;
+            let shocks = &normals[normal_start..normal_start + paths];
+            if parallel {
+                exponents
+                    .par_iter_mut()
+                    .zip(current.par_iter())
+                    .zip(shocks.par_iter())
+                    .for_each(|((exponent, &spot), &normal)| {
+                        *exponent = if spot == 0.0 {
+                            0.0
+                        } else {
+                            step.diffusion().mul_add(normal, step.log_drift())
+                        };
+                    });
+            } else {
+                for ((exponent, &spot), &normal) in exponents.iter_mut().zip(&current).zip(shocks) {
+                    *exponent = if spot == 0.0 {
+                        0.0
+                    } else {
+                        step.diffusion().mul_add(normal, step.log_drift())
+                    };
+                }
+            }
+            math_backend.exp_f64(&exponents, &mut growth)?;
+            if parallel {
+                Self::multiply_growth_parallel(step, &mut current, &growth, shocks)?;
+            } else {
+                for (path, ((spot, &factor), &normal)) in
+                    current.iter_mut().zip(&growth).zip(shocks).enumerate()
+                {
+                    let before = *spot;
+                    let next = before * factor;
+                    if !next.is_finite() {
+                        return Err(SimulationError::NonFinitePathTransition {
+                            from: step.from().get(),
+                            to: step.to().get(),
+                            path,
+                            spot: before,
+                            normal,
+                        });
+                    }
+                    *spot = next;
+                }
+            }
+
+            let node = step.to();
+            if self.observation_nodes[observation_index] == node {
+                let output_start = observation_index * paths;
+                values[output_start..output_start + paths].copy_from_slice(&current);
+                observation_index += 1;
+            }
+            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
+                for spot in &mut current {
+                    *spot = dividend.apply(self.dividend_policy, *spot)?;
+                }
+            }
+        }
+        debug_assert_eq!(observation_index, self.observation_nodes.len());
+        Ok(SimulatedPaths {
+            plan: self.clone(),
+            random_stream: None,
+            initial_spot,
+            paths,
+            values,
+        })
+    }
+
+    fn multiply_growth_parallel(
+        step: GbmStep,
+        current: &mut [f64],
+        growth: &[f64],
+        shocks: &[f64],
+    ) -> Result<(), SimulationError> {
+        let first_failure = AtomicUsize::new(usize::MAX);
+        current
+            .par_iter_mut()
+            .zip(growth.par_iter())
+            .enumerate()
+            .for_each(|(path, (spot, &factor))| {
+                let next = *spot * factor;
+                if next.is_finite() {
+                    *spot = next;
+                } else {
+                    first_failure.fetch_min(path, Ordering::Relaxed);
+                }
+            });
+        let path = first_failure.load(Ordering::Relaxed);
+        if path != usize::MAX {
+            return Err(SimulationError::NonFinitePathTransition {
+                from: step.from().get(),
+                to: step.to().get(),
+                path,
+                spot: current[path],
+                normal: shocks[path],
+            });
+        }
+        Ok(())
     }
 
     /// Simulates into caller-owned reusable workspace and output buffers.
@@ -480,6 +648,29 @@ impl EscrowedGbmPathPlan {
         self.reconstruct_observed_stock(initial_spot, simulated)
     }
 
+    /// Simulates serial escrowed paths with an explicit GBM exponential implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed initial-state, backend, transition, or reconstruction failure. The named
+    /// implementation is never replaced.
+    pub fn simulate_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated = self.risky_prepaid_forward.simulate_with_math_backend(
+            math_backend,
+            initial_prepaid_forward,
+            paths,
+            normals,
+        )?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
     /// Generates serial seeded paths and reconstructs pre-event stock observations.
     ///
     /// # Errors
@@ -498,6 +689,31 @@ impl EscrowedGbmPathPlan {
         self.reconstruct_observed_stock(initial_spot, simulated)
     }
 
+    /// Generates serial escrowed paths with an explicit GBM exponential implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed initial-state, random-generation, backend, transition, or reconstruction
+    /// failure. The named implementation is never replaced.
+    pub fn simulate_seeded_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+        let simulated = self
+            .risky_prepaid_forward
+            .simulate_seeded_with_math_backend(
+                math_backend,
+                initial_prepaid_forward,
+                paths,
+                stream,
+            )?;
+        self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
     pub(crate) fn simulate_parallel(
         &self,
         initial_spot: f64,
@@ -513,6 +729,30 @@ impl EscrowedGbmPathPlan {
         self.reconstruct_observed_stock(initial_spot, simulated)
     }
 
+    pub(crate) fn simulate_parallel_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        normals: &[f64],
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => self.simulate_parallel(initial_spot, paths, normals),
+            CpuMathBackend::AppleAccelerateVforce => {
+                let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+                let simulated = self
+                    .risky_prepaid_forward
+                    .simulate_parallel_with_math_backend(
+                        math_backend,
+                        initial_prepaid_forward,
+                        paths,
+                        normals,
+                    )?;
+                self.reconstruct_observed_stock(initial_spot, simulated)
+            }
+        }
+    }
+
     pub(crate) fn simulate_seeded_parallel(
         &self,
         initial_spot: f64,
@@ -526,6 +766,32 @@ impl EscrowedGbmPathPlan {
             stream,
         )?;
         self.reconstruct_observed_stock(initial_spot, simulated)
+    }
+
+    pub(crate) fn simulate_seeded_parallel_with_math_backend(
+        &self,
+        math_backend: CpuMathBackend,
+        initial_spot: f64,
+        paths: usize,
+        stream: RandomStream,
+    ) -> Result<SimulatedPaths, SimulationError> {
+        match math_backend {
+            CpuMathBackend::RustStdF64 => {
+                self.simulate_seeded_parallel(initial_spot, paths, stream)
+            }
+            CpuMathBackend::AppleAccelerateVforce => {
+                let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
+                let simulated = self
+                    .risky_prepaid_forward
+                    .simulate_seeded_parallel_with_math_backend(
+                        math_backend,
+                        initial_prepaid_forward,
+                        paths,
+                        stream,
+                    )?;
+                self.reconstruct_observed_stock(initial_spot, simulated)
+            }
+        }
     }
 
     fn initial_prepaid_forward(&self, initial_spot: f64) -> Result<f64, SimulationError> {

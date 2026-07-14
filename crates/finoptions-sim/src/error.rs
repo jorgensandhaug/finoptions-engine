@@ -1,6 +1,7 @@
 //! Typed construction and execution failures for simulation kernels.
 
 use finoptions_core::InputError;
+use finoptions_runtime::CpuMathError;
 use thiserror::Error;
 
 /// A failure to construct or execute an exact simulation plan.
@@ -10,6 +11,10 @@ pub enum SimulationError {
     /// Financial input validation failed.
     #[error(transparent)]
     Input(#[from] InputError),
+
+    /// The requested named CPU math implementation could not honor the kernel contract.
+    #[error(transparent)]
+    CpuMath(#[from] CpuMathError),
 
     /// A requested transition skipped or reversed model nodes.
     #[error("GBM transition must join adjacent increasing nodes; observed {from} -> {to}")]

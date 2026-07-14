@@ -51,6 +51,7 @@ from .model import (
 )
 from .simulation import (
     CpuExecutor,
+    CpuMathBackend,
     ExecutionError,
     GbmPaths,
     RandomStream,
@@ -84,6 +85,7 @@ __all__ = [
     "ConstantVolatility",
     "ContinuousDividendYieldBatch",
     "CpuExecutor",
+    "CpuMathBackend",
     "CumulativeDividendYieldCurve",
     "DividendBinSpec",
     "DividendPolicy",

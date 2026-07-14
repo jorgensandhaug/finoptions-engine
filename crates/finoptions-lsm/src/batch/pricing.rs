@@ -7,7 +7,7 @@ use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
 };
-use finoptions_sim::{CpuExecutor, EscrowedGbmPathPlan, GbmPathPlan, RandomStream};
+use finoptions_sim::{CpuExecutor, CpuMathBackend, EscrowedGbmPathPlan, GbmPathPlan, RandomStream};
 use rayon::prelude::*;
 
 use crate::{ExerciseFitDiagnostics, LsmCallEstimator, LsmRun, RegressionDiagnostics};
@@ -166,16 +166,24 @@ impl<'a> BatchLsmCallInputs<'a> {
         executor: &CpuExecutor,
     ) -> Result<BatchLsmCallResult, BatchLsmError> {
         method.random_streams().validate(self.rows())?;
-        executor.dispatch(|| self.price_serial(method), || self.price_parallel(method))
+        let math_backend = executor.math_backend();
+        executor.dispatch(
+            || self.price_serial(method, math_backend),
+            || self.price_parallel(method, math_backend),
+        )
     }
 
-    fn price_serial(self, method: BatchLsmCallMethod) -> Result<BatchLsmCallResult, BatchLsmError> {
+    fn price_serial(
+        self,
+        method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
+    ) -> Result<BatchLsmCallResult, BatchLsmError> {
         let mut results = Vec::new();
         results
             .try_reserve_exact(self.rows())
             .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: self.rows() })?;
         for row in 0..self.rows() {
-            results.push(self.price_row(method, row)?);
+            results.push(self.price_row(method, math_backend, row)?);
         }
         Ok(BatchLsmCallResult { rows: results })
     }
@@ -183,6 +191,7 @@ impl<'a> BatchLsmCallInputs<'a> {
     fn price_parallel(
         self,
         method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
     ) -> Result<BatchLsmCallResult, BatchLsmError> {
         let mut results = Vec::new();
         results
@@ -197,7 +206,7 @@ impl<'a> BatchLsmCallInputs<'a> {
                 if row > first_failure.load(Ordering::Relaxed) {
                     return;
                 }
-                match self.price_row(method, row) {
+                match self.price_row(method, math_backend, row) {
                     Ok(result) => *output = result,
                     Err(_) => {
                         first_failure.fetch_min(row, Ordering::Relaxed);
@@ -209,7 +218,7 @@ impl<'a> BatchLsmCallInputs<'a> {
         if failed_row == usize::MAX {
             return Ok(BatchLsmCallResult { rows: results });
         }
-        match self.price_row(method, failed_row) {
+        match self.price_row(method, math_backend, failed_row) {
             Err(error) => Err(error),
             Ok(_) => Err(BatchLsmError::ParallelFailureReplayMismatch { row: failed_row }),
         }
@@ -218,6 +227,7 @@ impl<'a> BatchLsmCallInputs<'a> {
     fn price_row(
         self,
         method: BatchLsmCallMethod,
+        math_backend: CpuMathBackend,
         row: usize,
     ) -> Result<BatchLsmCallRowResult, BatchLsmError> {
         let (plan, curve) = self.build_plan(method, row)?;
@@ -230,7 +240,8 @@ impl<'a> BatchLsmCallInputs<'a> {
         let evaluation_stream =
             RandomStream::new(streams.evaluation_seed(), streams.evaluation_domain(row)?);
         let run = match &plan {
-            RowPathPlan::Spot(plan) => estimator.price_seeded_serial(
+            RowPathPlan::Spot(plan) => estimator.price_seeded_serial_with_math_backend(
+                math_backend,
                 plan,
                 &curve,
                 self.initial_spots[row],
@@ -239,15 +250,17 @@ impl<'a> BatchLsmCallInputs<'a> {
                 training_stream,
                 evaluation_stream,
             ),
-            RowPathPlan::Escrowed(plan) => estimator.price_escrowed_seeded_serial(
-                plan,
-                &curve,
-                self.initial_spots[row],
-                method.training_paths(),
-                method.evaluation_paths(),
-                training_stream,
-                evaluation_stream,
-            ),
+            RowPathPlan::Escrowed(plan) => estimator
+                .price_escrowed_seeded_serial_with_math_backend(
+                    math_backend,
+                    plan,
+                    &curve,
+                    self.initial_spots[row],
+                    method.training_paths(),
+                    method.evaluation_paths(),
+                    training_stream,
+                    evaluation_stream,
+                ),
         }
         .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
         BatchLsmCallRowResult::try_from_run(row, run)
@@ -1293,6 +1306,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(serial, parallel);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_vector_batch_is_thread_invariant_and_respects_call_bounds() {
+        let spots = [100.0, 120.0];
+        let strikes = [100.0, 110.0];
+        let maturities = [1.0, 0.75];
+        let rates = [0.05, 0.03];
+        let volatilities = [0.25, 0.30];
+        let yields = [0.02, 0.01];
+        let inputs = valid_continuous_inputs(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            &yields,
+        );
+        let serial_executor =
+            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerateVforce)
+                .unwrap();
+        let parallel_executor =
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
+                .unwrap();
+        let serial = inputs
+            .price(method(OriginExercise::Excluded), &serial_executor)
+            .unwrap();
+        let parallel = inputs
+            .price(method(OriginExercise::Excluded), &parallel_executor)
+            .unwrap();
+        assert_eq!(serial, parallel);
+        for (&spot, result) in spots.iter().zip(serial.as_slice()) {
+            assert!(result.price() >= 0.0);
+            assert!(result.price() <= spot);
+            assert!(result.standard_error().is_finite());
+            assert_eq!(result.early_exercise_paths() + result.expiry_paths(), 2_048);
+        }
     }
 
     #[test]

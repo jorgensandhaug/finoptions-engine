@@ -15,3 +15,4 @@ repository.
 - [ADR 0009: Explicit integrated continuous dividend yield](0009-explicit-continuous-dividend-yield.md)
 - [ADR 0010: Contract-parallel independent-policy LSM batches](0010-contract-parallel-lsm-batches.md)
 - [ADR 0011: Explicit escrowed cash-dividend approximation](0011-explicit-escrowed-cash-dividends.md)
+- [ADR 0012: Explicit Apple vector-math backend](0012-explicit-apple-vector-math.md)

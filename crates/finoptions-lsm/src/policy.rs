@@ -1,7 +1,9 @@
 //! Fixed-policy construction and independent path evaluation for call options.
 
 use finoptions_core::{LogDiscountCurve, NodeId};
-use finoptions_sim::{CpuExecutor, EscrowedGbmPathPlan, GbmPathPlan, RandomStream, SimulatedPaths};
+use finoptions_sim::{
+    CpuExecutor, CpuMathBackend, EscrowedGbmPathPlan, GbmPathPlan, RandomStream, SimulatedPaths,
+};
 
 use crate::regression::{PolynomialModel, RegressionWorkspace};
 use crate::{LsmError, PolynomialRegressionSpec, RegressionDiagnostics};
@@ -259,8 +261,33 @@ impl LsmCallEstimator {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn price_seeded_serial(
         self,
+        plan: &GbmPathPlan,
+        curve: &LogDiscountCurve,
+        initial_spot: f64,
+        training_paths: usize,
+        evaluation_paths: usize,
+        training_stream: RandomStream,
+        evaluation_stream: RandomStream,
+    ) -> Result<LsmRun, LsmError> {
+        self.price_seeded_serial_with_math_backend(
+            CpuMathBackend::RustStdF64,
+            plan,
+            curve,
+            initial_spot,
+            training_paths,
+            evaluation_paths,
+            training_stream,
+            evaluation_stream,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn price_seeded_serial_with_math_backend(
+        self,
+        math_backend: CpuMathBackend,
         plan: &GbmPathPlan,
         curve: &LogDiscountCurve,
         initial_spot: f64,
@@ -278,20 +305,55 @@ impl LsmCallEstimator {
             return Err(LsmError::SimulationCurveMismatch);
         }
         let training = plan
-            .simulate_seeded(initial_spot, training_paths, training_stream)
+            .simulate_seeded_with_math_backend(
+                math_backend,
+                initial_spot,
+                training_paths,
+                training_stream,
+            )
             .map_err(|source| LsmError::TrainingSimulation { source })?;
         let policy = self.fit(&training, curve, initial_spot)?;
         drop(training);
         let evaluation_paths = plan
-            .simulate_seeded(initial_spot, evaluation_paths, evaluation_stream)
+            .simulate_seeded_with_math_backend(
+                math_backend,
+                initial_spot,
+                evaluation_paths,
+                evaluation_stream,
+            )
             .map_err(|source| LsmError::EvaluationSimulation { source })?;
         let evaluation = policy.evaluate(&evaluation_paths)?;
         Ok(LsmRun { policy, evaluation })
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn price_escrowed_seeded_serial(
         self,
+        plan: &EscrowedGbmPathPlan,
+        curve: &LogDiscountCurve,
+        initial_spot: f64,
+        training_paths: usize,
+        evaluation_paths: usize,
+        training_stream: RandomStream,
+        evaluation_stream: RandomStream,
+    ) -> Result<LsmRun, LsmError> {
+        self.price_escrowed_seeded_serial_with_math_backend(
+            CpuMathBackend::RustStdF64,
+            plan,
+            curve,
+            initial_spot,
+            training_paths,
+            evaluation_paths,
+            training_stream,
+            evaluation_stream,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn price_escrowed_seeded_serial_with_math_backend(
+        self,
+        math_backend: CpuMathBackend,
         plan: &EscrowedGbmPathPlan,
         curve: &LogDiscountCurve,
         initial_spot: f64,
@@ -309,12 +371,22 @@ impl LsmCallEstimator {
             return Err(LsmError::SimulationCurveMismatch);
         }
         let training = plan
-            .simulate_seeded(initial_spot, training_paths, training_stream)
+            .simulate_seeded_with_math_backend(
+                math_backend,
+                initial_spot,
+                training_paths,
+                training_stream,
+            )
             .map_err(|source| LsmError::TrainingSimulation { source })?;
         let policy = self.fit(&training, curve, initial_spot)?;
         drop(training);
         let evaluation_paths = plan
-            .simulate_seeded(initial_spot, evaluation_paths, evaluation_stream)
+            .simulate_seeded_with_math_backend(
+                math_backend,
+                initial_spot,
+                evaluation_paths,
+                evaluation_stream,
+            )
             .map_err(|source| LsmError::EvaluationSimulation { source })?;
         let evaluation = policy.evaluate(&evaluation_paths)?;
         Ok(LsmRun { policy, evaluation })

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from itertools import pairwise
 from typing import Final
 
@@ -28,11 +29,19 @@ _MAX_DOMAIN: Final = (2**32) - 1
 _MAX_PATHS: Final = (2**32) - 1
 
 
+class CpuMathBackend(StrEnum):
+    """Named floating-point implementation for vectorizable CPU pricing kernels."""
+
+    RUST_STD_F64 = "rust_std_f64"
+    APPLE_ACCELERATE_VFORCE = "apple_accelerate_vforce"
+
+
 @dataclass(frozen=True, slots=True)
 class CpuExecutor:
-    """Reusable dedicated CPU execution resource with an exact worker count."""
+    """Reusable CPU resource with exact worker and numerical backend choices."""
 
     threads: int
+    math_backend: CpuMathBackend = CpuMathBackend.RUST_STD_F64
     _handle: _native.CpuExecutor = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -40,7 +49,16 @@ class CpuExecutor:
         if type(self.threads) is not int or self.threads <= 0:
             msg = f"threads must be a positive plain int; observed {self.threads!r}"
             raise InputError(msg)
-        object.__setattr__(self, "_handle", _native.CpuExecutor(self.threads))
+        if type(self.math_backend) is not CpuMathBackend:
+            msg = (
+                f"math_backend must be CpuMathBackend; observed {type(self.math_backend).__name__}"
+            )
+            raise InputError(msg)
+        object.__setattr__(
+            self,
+            "_handle",
+            _native.CpuExecutor(self.threads, self.math_backend.value),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +322,7 @@ def simulate_gbm_seeded(  # noqa: PLR0913 - each explicit financial input is ind
 
 __all__ = [
     "CpuExecutor",
+    "CpuMathBackend",
     "ExecutionError",
     "GbmPaths",
     "RandomStream",

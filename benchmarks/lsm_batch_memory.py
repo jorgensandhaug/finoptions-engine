@@ -14,6 +14,7 @@ import numpy as np
 from finoptions import (
     ContinuousDividendYieldBatch,
     CpuExecutor,
+    CpuMathBackend,
     ExerciseTieRule,
     Lsm,
     OriginExercise,
@@ -37,6 +38,11 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rows", type=int, default=_DEFAULT_ROWS)
     parser.add_argument("--threads", type=int, default=_DEFAULT_THREADS)
+    parser.add_argument(
+        "--math-backend",
+        choices=tuple(backend.value for backend in CpuMathBackend),
+        default=CpuMathBackend.RUST_STD_F64.value,
+    )
     return parser.parse_args()
 
 
@@ -45,6 +51,7 @@ def main() -> None:
     arguments = _arguments()
     rows = arguments.rows
     threads = arguments.threads
+    math_backend = CpuMathBackend(arguments.math_backend)
     if rows <= 0 or threads <= 0:
         msg = "rows and threads must be positive"
         raise ValueError(msg)
@@ -55,7 +62,7 @@ def main() -> None:
     rates = np.full(rows, 0.05, dtype=np.float64)
     volatilities = np.full(rows, 0.25, dtype=np.float64)
     yields = np.full(rows, 0.02, dtype=np.float64)
-    executor = CpuExecutor(threads=threads)
+    executor = CpuExecutor(threads=threads, math_backend=math_backend)
     method = Lsm(
         training_paths=_PATHS,
         evaluation_paths=_PATHS,
@@ -93,6 +100,7 @@ def main() -> None:
         "contracts_per_second": rows / elapsed,
         "elapsed_seconds": elapsed,
         "incremental_peak_rss_bytes": peak - baseline,
+        "math_backend": math_backend.value,
         "peak_max_rss_bytes": peak,
         "rows": rows,
         "threads": threads,
