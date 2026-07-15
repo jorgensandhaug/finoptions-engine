@@ -528,12 +528,26 @@ fn one_sided_jacobi_singular_values(
     matrix: &mut [f64; MAX_BASIS_COLUMNS * MAX_BASIS_COLUMNS],
     columns: usize,
 ) -> Result<[f64; MAX_BASIS_COLUMNS], RegressionError> {
+    match columns {
+        1 => one_sided_jacobi_singular_values_for::<1>(matrix),
+        2 => one_sided_jacobi_singular_values_for::<2>(matrix),
+        3 => one_sided_jacobi_singular_values_for::<3>(matrix),
+        4 => one_sided_jacobi_singular_values_for::<4>(matrix),
+        5 => one_sided_jacobi_singular_values_for::<5>(matrix),
+        _ => unreachable!("validated polynomial degree has one to five columns"),
+    }
+}
+
+fn one_sided_jacobi_singular_values_for<const COLUMNS: usize>(
+    matrix: &mut [f64; MAX_BASIS_COLUMNS * MAX_BASIS_COLUMNS],
+) -> Result<[f64; MAX_BASIS_COLUMNS], RegressionError> {
     let mut converged = false;
     for _ in 0..JACOBI_MAX_SWEEPS {
         converged = true;
-        for left in 0..columns - 1 {
-            for right in left + 1..columns {
-                let (left_norm, right_norm, cross) = column_products(matrix, columns, left, right);
+        for left in 0..COLUMNS - 1 {
+            for right in left + 1..COLUMNS {
+                let (left_norm, right_norm, cross) =
+                    column_products::<COLUMNS>(matrix, left, right);
                 if !left_norm.is_finite()
                     || !right_norm.is_finite()
                     || !cross.is_finite()
@@ -554,9 +568,12 @@ fn one_sided_jacobi_singular_values(
                 } else {
                     zeta.signum() / (zeta.abs() + zeta.hypot(1.0))
                 };
-                let cosine = tangent.hypot(1.0).recip();
+                // Construction bounds |tangent| by one, so this direct norm cannot overflow or
+                // underflow and need not pay for the general-magnitude `hypot` rescaling path.
+                debug_assert!(tangent.abs() <= 1.0);
+                let cosine = tangent.mul_add(tangent, 1.0).sqrt().recip();
                 let sine = cosine * tangent;
-                for row in 0..columns {
+                for row in 0..COLUMNS {
                     let left_index = left * MAX_BASIS_COLUMNS + row;
                     let right_index = right * MAX_BASIS_COLUMNS + row;
                     let left_value = matrix[left_index];
@@ -572,33 +589,32 @@ fn one_sided_jacobi_singular_values(
     }
     if !converged {
         return Err(RegressionError::ConditionDiagnosticDidNotConverge {
-            columns,
+            columns: COLUMNS,
             sweeps: JACOBI_MAX_SWEEPS,
         });
     }
 
     let mut singular_values = [0.0; MAX_BASIS_COLUMNS];
-    for column in 0..columns {
+    for column in 0..COLUMNS {
         let mut squared_norm = 0.0;
-        for row in 0..columns {
+        for row in 0..COLUMNS {
             squared_norm += matrix[column * MAX_BASIS_COLUMNS + row].powi(2);
         }
         singular_values[column] = squared_norm.sqrt();
     }
-    singular_values[..columns].sort_by(|left, right| right.total_cmp(left));
+    singular_values[..COLUMNS].sort_by(|left, right| right.total_cmp(left));
     Ok(singular_values)
 }
 
-fn column_products(
+fn column_products<const ROWS: usize>(
     matrix: &[f64; MAX_BASIS_COLUMNS * MAX_BASIS_COLUMNS],
-    rows: usize,
     left: usize,
     right: usize,
 ) -> (f64, f64, f64) {
     let mut left_norm = 0.0;
     let mut right_norm = 0.0;
     let mut cross = 0.0;
-    for row in 0..rows {
+    for row in 0..ROWS {
         let left_value = matrix[left * MAX_BASIS_COLUMNS + row];
         let right_value = matrix[right * MAX_BASIS_COLUMNS + row];
         left_norm = left_value.mul_add(left_value, left_norm);
@@ -778,11 +794,18 @@ mod tests {
 
     #[test]
     fn agrees_with_independent_svd_on_predictions_and_conditioning() {
-        for observations in [500, 65_536] {
+        for (degree, observations) in [
+            (0, 500),
+            (1, 500),
+            (2, 500),
+            (3, 500),
+            (4, 500),
+            (4, 65_536),
+        ] {
             let (predictors, responses) = representative_population(observations);
             let mut workspace = RegressionWorkspace::default();
             let model = workspace
-                .fit(&predictors, &responses, spec(4, 1.0e8))
+                .fit(&predictors, &responses, spec(degree, 1.0e8))
                 .unwrap();
             let (oracle_predictions, oracle_condition) =
                 svd_oracle(&predictors, &responses, &model);
@@ -796,21 +819,28 @@ mod tests {
                 2.0e-11,
                 2.0e-12,
             );
-            assert_eq!(model.diagnostics().rank(), 5);
+            assert_eq!(model.diagnostics().rank(), degree + 1);
         }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn apple_accelerate_agrees_with_independent_svd_on_predictions_and_conditioning() {
-        for observations in [500, 65_536] {
+        for (degree, observations) in [
+            (0, 500),
+            (1, 500),
+            (2, 500),
+            (3, 500),
+            (4, 500),
+            (4, 65_536),
+        ] {
             let (predictors, responses) = representative_population(observations);
             let mut workspace = RegressionWorkspace::default();
             let model = workspace
                 .fit_with_math_backend(
                     &predictors,
                     &responses,
-                    spec(4, 1.0e8),
+                    spec(degree, 1.0e8),
                     CpuMathBackend::AppleAccelerate,
                 )
                 .unwrap();
@@ -826,7 +856,7 @@ mod tests {
                 2.0e-11,
                 2.0e-12,
             );
-            assert_eq!(model.diagnostics().rank(), 5);
+            assert_eq!(model.diagnostics().rank(), degree + 1);
         }
     }
 

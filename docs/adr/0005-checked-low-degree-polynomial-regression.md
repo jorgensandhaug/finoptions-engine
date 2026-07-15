@@ -29,7 +29,10 @@ orthonormal empirical basis. A one-sided Jacobi SVD of that at-most `5 x 5` tran
 the two-norm condition without forming a Gram matrix. The transformation and standardized
 Vandermonde design have reciprocal singular values and therefore the same condition number. The
 relative rank tolerance and condition limit are explicit estimator inputs. A condition limit may
-not exceed the reciprocal rank tolerance.
+not exceed the reciprocal rank tolerance. The validated one-to-five-column dimension dispatches to
+fixed-size Jacobi implementations so the compiler can specialize the tiny matrix loops; unsupported
+dimensions remain unreachable through the validated public configuration rather than selecting a
+different solver.
 
 All predictor and response values are validated before workspace reuse. Unsupported degree,
 insufficient observations, non-finite input/arithmetic, degenerate predictor scale, numerical rank
@@ -39,10 +42,11 @@ continuation rule.
 
 ## Evidence
 
-Tests compare accepted projections and condition numbers with nalgebra 0.35.0 SVD calculations on
-representative 500- and 65,536-row populations, verify affine state rescaling and exact polynomial
-recovery, and compare adversarial rank/condition classifications. The oracle is a development-only
-dependency; the production LSM dependency graph remains limited to engine crates and `thiserror`.
+Tests compare accepted projections and condition numbers with nalgebra 0.35.0 SVD calculations for
+every supported degree on a representative 500-row population and for degree four on 65,536 rows,
+verify affine state rescaling and exact polynomial recovery, and compare adversarial rank/condition
+classifications. The oracle is a development-only dependency; the production LSM dependency graph
+remains limited to engine crates and `thiserror`.
 
 On an Apple M4 Pro, Criterion 0.8.2 measured the complete allocation-reusing degree-four kernel,
 including validation and condition diagnostics, at about `9.54 us` for 500 rows and `1.05 ms` for

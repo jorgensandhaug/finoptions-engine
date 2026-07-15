@@ -48,14 +48,37 @@ with Apple path simulation held fixed, adding vDSP moments reduced grouped media
 6.2%; its bootstrap interval excluded zero. The final table is the authoritative reproducible
 checkpoint for the integrated implementation.
 
+## Subsequent fixed-size Jacobi specialization
+
+The condition diagnostic only supports transformation matrices with one through five columns, but
+the original implementation carried that dimension as a runtime loop bound. Dispatching once to
+five const-generic implementations lets the compiler specialize those tiny loops without changing
+the declared regression, Jacobi rotation, rank tolerance, condition limit, or failure behavior. A
+separate normalization change replaces `hypot(tangent, 1)` with the direct norm only after the
+Jacobi construction has proved `abs(tangent) <= 1`; consequently the squared sum lies in `[1, 2]`
+and cannot overflow or underflow.
+
+The const-generic change was measured against the already-normalized implementation. At 500 rows,
+the scalar degree-four fit improved by 7.53% (bootstrap interval 7.41%--7.66%) and the Apple fit by
+9.27% (9.18%--9.36%). The complete grouped workload improved by 3.82% for scalar
+(3.20%--4.48%) and 4.68% for Apple (3.42%--5.79%). Representative post-change means were about
+8.80 us and 6.67 us for the scalar and Apple fits; a fresh grouped confirmation measured 324.57 ms
+and 271.89 ms, respectively. These measurements extend rather than rewrite the earlier vDSP
+checkpoint above.
+
+Reusing the stored candidate predictor to remove a second division was rejected: it had no
+detectable scalar benefit and made the Apple grouped candidate slower in the paired run. The
+candidate was removed instead of retained as inactive complexity.
+
 ## Correctness gates
 
 - The unsafe wrapper is isolated under the crate safety contract and checks all four operand
   lengths before entering vDSP.
 - A 65,536-row deterministic population compares each vDSP reduction with a compensated sum under
   a fixed forward-error bound and checks the squared-basis workspace.
-- The complete Apple degree-four regression agrees with an independent SVD oracle on predictions,
-  rank, and condition number at 500 and 65,536 observations.
+- Both backends agree with an independent SVD oracle on predictions, rank, and condition number for
+  every supported degree at 500 observations and for degree four at 65,536 observations. This
+  exercises all five fixed-size diagnostic implementations.
 - Seeded Apple simulation is bitwise invariant across worker counts and remains within its declared
   vForce tolerance of the scalar transition.
 - Apple batch LSM is bitwise invariant across worker counts, satisfies call bounds, and preserves
