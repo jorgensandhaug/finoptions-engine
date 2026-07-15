@@ -340,6 +340,7 @@ dependencies = [
  "criterion",
  "finoptions-core",
  "finoptions-runtime",
+ "libm",
  "rayon",
  "thiserror",
 ]

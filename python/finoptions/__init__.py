@@ -28,6 +28,7 @@ from .batch_lsm import (
     price_lsm_call_batch,
     price_lsm_call_grouped_batch,
 )
+from .bootstrap import BootstrapError, StationaryBootstrap
 from .dividends import (
     BatchError,
     BinnedCashDividends,
@@ -101,6 +102,7 @@ __all__ = [
     "BatchDividends",
     "BatchError",
     "BinnedCashDividends",
+    "BootstrapError",
     "BuildInfo",
     "CashAmountScale",
     "CashDividend",
@@ -145,6 +147,7 @@ __all__ = [
     "RandomStream",
     "RegressionFitDiagnostics",
     "SimulationError",
+    "StationaryBootstrap",
     "TimeBinClosure",
     "UniformExerciseMesh",
     "__version__",

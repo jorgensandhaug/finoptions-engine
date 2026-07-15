@@ -42,8 +42,9 @@ use finoptions_runtime::{
     ExecutionError as CoreExecutionError,
 };
 use finoptions_sim::{
+    AdditivePanelStatistics as CoreAdditivePanelStatistics, BootstrapError as CoreBootstrapError,
     GbmPathPlan, RandomStream as CoreRandomStream, SimulatedPaths,
-    SimulationError as CoreSimulationError,
+    SimulationError as CoreSimulationError, StationaryBootstrapSpec as CoreStationaryBootstrapSpec,
 };
 use ndarray::Array2;
 use numpy::{
@@ -57,6 +58,7 @@ create_exception!(_native, InputError, PyValueError);
 create_exception!(_native, BatchError, PyValueError);
 create_exception!(_native, ExecutionError, PyRuntimeError);
 create_exception!(_native, SimulationError, PyRuntimeError);
+create_exception!(_native, BootstrapError, PyRuntimeError);
 create_exception!(_native, LsmError, PyRuntimeError);
 create_exception!(_native, QuadratureError, PyRuntimeError);
 create_exception!(_native, AmericanOptionError, PyRuntimeError);
@@ -243,6 +245,29 @@ impl IntoPyInputError for CoreInputError {
 
 trait IntoPySimulationError {
     fn into_py_simulation_error(self) -> PyErr;
+}
+
+trait IntoPyBootstrapError {
+    fn into_py_bootstrap_error(self) -> PyErr;
+}
+
+impl IntoPyBootstrapError for CoreBootstrapError {
+    fn into_py_bootstrap_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreBootstrapError::EmptyPanels
+            | CoreBootstrapError::EmptyStatistics
+            | CoreBootstrapError::ShapeOverflow { .. }
+            | CoreBootstrapError::ShapeMismatch { .. }
+            | CoreBootstrapError::NonFiniteInput { .. }
+            | CoreBootstrapError::PanelCountExceedsExactF64Maximum { .. }
+            | CoreBootstrapError::ZeroReplications
+            | CoreBootstrapError::ReplicationCountOverflow { .. }
+            | CoreBootstrapError::ReplicationPathRangeOverflow { .. }
+            | CoreBootstrapError::InvalidMeanBlockLength { .. } => InputError::new_err(message),
+            _ => BootstrapError::new_err(message),
+        }
+    }
 }
 
 impl IntoPySimulationError for CoreSimulationError {
@@ -858,6 +883,42 @@ fn simulated_into_array(
     let values = simulated.into_values();
     let array = Array2::from_shape_vec((rows, paths), values)
         .map_err(|error| SimulationError::new_err(error.to_string()))?;
+    Ok(array.into_pyarray(py))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn stationary_bootstrap_panel_sums_f64<'py>(
+    py: Python<'py>,
+    panel_statistics: PyReadonlyArray2<'py, f64>,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    replications: usize,
+    mean_block_length: f64,
+    seed: u64,
+    domain: u32,
+    replication_path_start: u32,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let shape = panel_statistics.shape();
+    let panels = shape[0];
+    let statistics = shape[1];
+    let values = panel_statistics.as_slice()?;
+    let inputs = CoreAdditivePanelStatistics::try_new(values, panels, statistics)
+        .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let spec = CoreStationaryBootstrapSpec::try_new(
+        replications,
+        mean_block_length,
+        CoreRandomStream::new(seed, domain),
+        replication_path_start,
+    )
+    .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let core_executor = &executor.inner;
+    let result = py
+        .detach(move || inputs.stationary_bootstrap_sums(spec, core_executor))
+        .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let rows = result.replications();
+    let columns = result.statistics();
+    let array = Array2::from_shape_vec((rows, columns), result.into_vec())
+        .map_err(|error| BootstrapError::new_err(error.to_string()))?;
     Ok(array.into_pyarray(py))
 }
 
@@ -2061,6 +2122,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("BatchError", module.py().get_type::<BatchError>())?;
     module.add("ExecutionError", module.py().get_type::<ExecutionError>())?;
     module.add("SimulationError", module.py().get_type::<SimulationError>())?;
+    module.add("BootstrapError", module.py().get_type::<BootstrapError>())?;
     module.add("LsmError", module.py().get_type::<LsmError>())?;
     module.add("QuadratureError", module.py().get_type::<QuadratureError>())?;
     module.add(
@@ -2072,6 +2134,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(pack_padded_dividends_f32, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        stationary_bootstrap_panel_sums_f64,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_event_aligned_call_f64, module)?)?;
     module.add_function(wrap_pyfunction!(

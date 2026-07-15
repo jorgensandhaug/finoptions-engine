@@ -23,5 +23,8 @@ check:
 test: native
     uv run --no-sync pytest -q
 
+bench-bootstrap threads="10": native
+    uv run --no-sync python benchmarks/stationary_bootstrap.py --threads {{threads}} --mean-block-length 5 --mean-block-length 10 --mean-block-length 20 --mean-block-length 40 --mean-block-length 60
+
 full: check test
     uv build
