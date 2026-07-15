@@ -304,7 +304,9 @@ impl<'a> BatchLsmCallInputs<'a> {
                 cash_policy: DividendPolicy::Liquidator,
                 escrowed_volatility: None,
             }),
-            BatchDividendModel::CashDividends { schedules, policy } => Ok(RowDividendModel {
+            BatchDividendModel::CashDividends {
+                schedules, policy, ..
+            } => Ok(RowDividendModel {
                 cash_schedule: Some(self.cash_row(schedules, row)?),
                 continuous_yield: 0.0,
                 cash_policy: policy,
@@ -313,6 +315,7 @@ impl<'a> BatchLsmCallInputs<'a> {
             BatchDividendModel::EscrowedCashDividends {
                 schedules,
                 volatility_convention,
+                ..
             } => Ok(RowDividendModel {
                 cash_schedule: Some(self.cash_row(schedules, row)?),
                 continuous_yield: 0.0,
@@ -517,7 +520,9 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
                 cash_policy: DividendPolicy::Liquidator,
                 escrowed_volatility: None,
             }),
-            BatchDividendModel::CashDividends { schedules, policy } => Ok(RowDividendModel {
+            BatchDividendModel::CashDividends {
+                schedules, policy, ..
+            } => Ok(RowDividendModel {
                 cash_schedule: Some(self.group_cash_row(schedules, group)?),
                 continuous_yield: 0.0,
                 cash_policy: policy,
@@ -526,6 +531,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
             BatchDividendModel::EscrowedCashDividends {
                 schedules,
                 volatility_convention,
+                ..
             } => Ok(RowDividendModel {
                 cash_schedule: Some(self.group_cash_row(schedules, group)?),
                 continuous_yield: 0.0,
@@ -899,7 +905,7 @@ impl BatchLsmCallRowResult {
 
 #[cfg(test)]
 mod tests {
-    use finoptions_batch::RaggedCashDividends;
+    use finoptions_batch::{MaturityBoundary, RaggedCashDividends};
 
     use super::*;
     use crate::{ExerciseTieRule, PolynomialDegree, PolynomialRegressionSpec};
@@ -1139,10 +1145,12 @@ mod tests {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Survivor,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
             BatchDividendModel::EscrowedCashDividends {
                 schedules: dividends,
                 volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         ] {
             let row = BatchLsmCallInputs::try_new(
@@ -1230,10 +1238,12 @@ mod tests {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Survivor,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
             BatchDividendModel::EscrowedCashDividends {
                 schedules: dividends,
                 volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         ] {
             let inputs = GroupedBatchLsmCallInputs::try_new(
@@ -1477,6 +1487,7 @@ mod tests {
                 BatchDividendModel::CashDividends {
                     schedules: duplicate,
                     policy: DividendPolicy::Survivor,
+                    maturity_boundary: MaturityBoundary::StrictlyBefore,
                 },
             ),
             Err(BatchLsmError::DuplicateCashDividendTime {
@@ -1497,12 +1508,12 @@ mod tests {
                 BatchDividendModel::CashDividends {
                     schedules: at_expiry,
                     policy: DividendPolicy::Survivor,
+                    maturity_boundary: MaturityBoundary::StrictlyBefore,
                 },
             ),
-            Err(BatchLsmError::CashDividendOutsideContract {
+            Err(BatchLsmError::CashDividendAtExcludedMaturity {
                 row: 0,
                 event: 0,
-                time: 1.0,
                 maturity: 1.0,
             })
         ));
@@ -1687,6 +1698,7 @@ mod tests {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Survivor,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap();
@@ -1759,6 +1771,7 @@ mod tests {
             BatchDividendModel::EscrowedCashDividends {
                 schedules: dividends,
                 volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap();
@@ -1854,6 +1867,7 @@ mod tests {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Survivor,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap();
@@ -1886,6 +1900,7 @@ mod tests {
             BatchDividendModel::EscrowedCashDividends {
                 schedules: dividends,
                 volatility_convention: EscrowedVolatilityConvention::SpotMatchedAtOrigin,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap();

@@ -10,7 +10,7 @@ import numpy as np
 import numpy.typing as npt
 
 from . import _native
-from .dividends import RaggedCashDividends
+from .dividends import MaturityBoundary, RaggedCashDividends
 from .lsm import Lsm, LsmError
 from .model import DividendPolicy, InputError
 from .simulation import CpuExecutor
@@ -92,10 +92,11 @@ class ContinuousDividendYieldBatch:
 
 @dataclass(frozen=True, slots=True)
 class CashDividendBatch:
-    """Exact ragged cash schedules under one declared limited-liability jump policy."""
+    """Exact cash schedules with explicit jump and terminal-boundary conventions."""
 
     schedules: RaggedCashDividends
     policy: DividendPolicy
+    maturity_boundary: MaturityBoundary
 
     def __post_init__(self) -> None:
         """Reject duck-typed schedules and implicit cash-jump conventions."""
@@ -104,6 +105,9 @@ class CashDividendBatch:
             raise InputError(msg)
         if type(self.policy) is not DividendPolicy:
             msg = "policy must be DividendPolicy"
+            raise InputError(msg)
+        if type(self.maturity_boundary) is not MaturityBoundary:
+            msg = "maturity_boundary must be MaturityBoundary"
             raise InputError(msg)
 
 
@@ -119,6 +123,7 @@ class EscrowedCashDividendBatch:
 
     schedules: RaggedCashDividends
     volatility_convention: EscrowedVolatilityConvention
+    maturity_boundary: MaturityBoundary
 
     def __post_init__(self) -> None:
         """Reject duck-typed schedules and any implicit volatility interpretation."""
@@ -127,6 +132,9 @@ class EscrowedCashDividendBatch:
             raise InputError(msg)
         if type(self.volatility_convention) is not EscrowedVolatilityConvention:
             msg = "volatility_convention must be EscrowedVolatilityConvention"
+            raise InputError(msg)
+        if type(self.maturity_boundary) is not MaturityBoundary:
+            msg = "maturity_boundary must be MaturityBoundary"
             raise InputError(msg)
 
 
@@ -388,6 +396,7 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
             dividends.schedules.times,
             dividends.schedules.amounts,
             dividends.policy.value,
+            dividends.maturity_boundary.value,
             *method_arguments,
         )
     elif type(dividends) is EscrowedCashDividendBatch:
@@ -397,6 +406,7 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
             dividends.schedules.times,
             dividends.schedules.amounts,
             dividends.volatility_convention.value,
+            dividends.maturity_boundary.value,
             *method_arguments,
         )
     else:
@@ -488,6 +498,7 @@ def price_lsm_call_grouped_batch(
             dividends.schedules.times,
             dividends.schedules.amounts,
             dividends.policy.value,
+            dividends.maturity_boundary.value,
             *method_arguments,
         )
     elif type(dividends) is EscrowedCashDividendBatch:
@@ -497,6 +508,7 @@ def price_lsm_call_grouped_batch(
             dividends.schedules.times,
             dividends.schedules.amounts,
             dividends.volatility_convention.value,
+            dividends.maturity_boundary.value,
             *method_arguments,
         )
     else:

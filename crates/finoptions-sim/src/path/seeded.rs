@@ -362,16 +362,19 @@ impl GbmPathPlan {
             }
 
             let node = step.to();
-            if self.observation_nodes[observation] == node {
+            let dividend = self.dividends_by_node[node.get() as usize];
+            let terminal_dividend = dividend.filter(|_| self.is_terminal_observation(node));
+            if let Some(cash) = terminal_dividend {
+                Self::apply_dividend(cash, self.dividend_policy, &mut workspace.spots)?;
+            }
+            if self.observation_nodes.get(observation).copied() == Some(node) {
                 for (local_path, &spot) in workspace.spots.iter().enumerate() {
                     output[local_path * observations + observation] = spot;
                 }
                 observation += 1;
             }
-            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
-                for spot in &mut workspace.spots {
-                    *spot = dividend.apply(self.dividend_policy, *spot)?;
-                }
+            if let Some(cash) = dividend.filter(|_| terminal_dividend.is_none()) {
+                Self::apply_dividend(cash, self.dividend_policy, &mut workspace.spots)?;
             }
         }
         debug_assert_eq!(observation, observations);
@@ -438,12 +441,17 @@ impl GbmPathPlan {
             spot = next;
 
             let node = step.to();
-            if self.observation_nodes[observation] == node {
+            let dividend = self.dividends_by_node[node.get() as usize];
+            let terminal_dividend = dividend.filter(|_| self.is_terminal_observation(node));
+            if let Some(cash) = terminal_dividend {
+                Self::apply_dividend(cash, self.dividend_policy, std::slice::from_mut(&mut spot))?;
+            }
+            if self.observation_nodes.get(observation).copied() == Some(node) {
                 observations[observation] = spot;
                 observation += 1;
             }
-            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
-                spot = dividend.apply(self.dividend_policy, spot)?;
+            if let Some(cash) = dividend.filter(|_| terminal_dividend.is_none()) {
+                Self::apply_dividend(cash, self.dividend_policy, std::slice::from_mut(&mut spot))?;
             }
         }
         debug_assert_eq!(observation, observations.len());

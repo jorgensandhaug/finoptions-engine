@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use finoptions_batch::RaggedCashDividends;
+use finoptions_batch::{MaturityBoundary, RaggedCashDividends};
 use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
@@ -102,6 +102,7 @@ impl Workload {
             BatchDividendModel::CashDividends {
                 schedules: self.dividends(),
                 policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap()
@@ -208,6 +209,7 @@ impl StrikeGroupWorkload {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap()
@@ -229,6 +231,7 @@ impl StrikeGroupWorkload {
             BatchDividendModel::CashDividends {
                 schedules: dividends,
                 policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
             },
         )
         .unwrap()

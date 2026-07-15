@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use crate::{CpuMathBackend, GbmStep, RandomStream, SimulationError};
 
-/// Immutable plan for GBM paths observed immediately before exercise/expiry decisions.
+/// Immutable plan for GBM paths observed before exercise and after any terminal cash jump.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GbmPathPlan {
     curve: LogDiscountCurve,
@@ -45,7 +45,8 @@ impl GbmPathPlan {
     /// Precomputes transitions and event lookup for one schedule and market model.
     ///
     /// Observation nodes are every configured exercise node followed by terminal expiry. If an
-    /// exercise and dividend share a node, the observed state is the pre-dividend state.
+    /// exercise and dividend share a nonterminal node, the observed state is pre-dividend. A cash
+    /// jump at expiry is applied before the terminal state is observed.
     ///
     /// # Errors
     ///
@@ -311,17 +312,13 @@ impl GbmPathPlan {
                 }
             }
 
-            let node = step.to();
-            if self.observation_nodes[observation_index] == node {
-                let output_start = observation_index * paths;
-                values[output_start..output_start + paths].copy_from_slice(&current);
-                observation_index += 1;
-            }
-            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
-                for spot in &mut current {
-                    *spot = dividend.apply(self.dividend_policy, *spot)?;
-                }
-            }
+            self.process_time_major_node(
+                step.to(),
+                &mut current,
+                &mut values,
+                &mut observation_index,
+                paths,
+            )?;
         }
         debug_assert_eq!(observation_index, self.observation_nodes.len());
         Ok(SimulatedPaths {
@@ -409,21 +406,74 @@ impl GbmPathPlan {
                 Self::advance_serial(step, current, shocks)?;
             }
 
-            let node = step.to();
-            if self.observation_nodes[observation_index] == node {
-                let output_start = observation_index * paths;
-                output[output_start..output_start + paths].copy_from_slice(current);
-                observation_index += 1;
-            }
-
-            if let Some(dividend) = self.dividends_by_node[node.get() as usize] {
-                for spot in &mut *current {
-                    *spot = dividend.apply(self.dividend_policy, *spot)?;
-                }
-            }
+            self.process_time_major_node(
+                step.to(),
+                current,
+                output,
+                &mut observation_index,
+                paths,
+            )?;
         }
         debug_assert_eq!(observation_index, self.observation_nodes.len());
         Ok(())
+    }
+
+    #[inline]
+    fn process_time_major_node(
+        &self,
+        node: NodeId,
+        current: &mut [f64],
+        output: &mut [f64],
+        observation: &mut usize,
+        paths: usize,
+    ) -> Result<(), SimulationError> {
+        match self.dividends_by_node[node.get() as usize] {
+            Some(dividend) if self.is_terminal_observation(node) => {
+                Self::apply_dividend(dividend, self.dividend_policy, current)?;
+                self.record_time_major_observation(node, current, output, observation, paths);
+            }
+            Some(dividend) => {
+                self.record_time_major_observation(node, current, output, observation, paths);
+                Self::apply_dividend(dividend, self.dividend_policy, current)?;
+            }
+            None => {
+                self.record_time_major_observation(node, current, output, observation, paths);
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn record_time_major_observation(
+        &self,
+        node: NodeId,
+        current: &[f64],
+        output: &mut [f64],
+        observation: &mut usize,
+        paths: usize,
+    ) {
+        if self.observation_nodes.get(*observation).copied() == Some(node) {
+            let output_start = *observation * paths;
+            output[output_start..output_start + paths].copy_from_slice(current);
+            *observation += 1;
+        }
+    }
+
+    #[inline]
+    fn apply_dividend(
+        dividend: CashDividend,
+        policy: DividendPolicy,
+        current: &mut [f64],
+    ) -> Result<(), SimulationError> {
+        for spot in current {
+            *spot = dividend.apply(policy, *spot)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn is_terminal_observation(&self, node: NodeId) -> bool {
+        self.observation_nodes.last().copied() == Some(node)
     }
 
     fn advance_serial(
@@ -629,7 +679,7 @@ impl EscrowedGbmPathPlan {
         self.risky_prepaid_forward.observation_nodes()
     }
 
-    /// Simulates serial paths and reconstructs pre-event cum-dividend stock observations.
+    /// Simulates serial paths and reconstructs pre-event exercise states and post-event expiry.
     ///
     /// # Errors
     ///
@@ -671,7 +721,7 @@ impl EscrowedGbmPathPlan {
         self.reconstruct_observed_stock(initial_spot, simulated)
     }
 
-    /// Generates serial seeded paths and reconstructs pre-event stock observations.
+    /// Generates serial seeded paths and reconstructs exercise and terminal stock observations.
     ///
     /// # Errors
     ///
@@ -820,7 +870,11 @@ impl EscrowedGbmPathPlan {
                 continue;
             }
 
-            let prepaid_cash = self.prepaid_cash_by_node[node.get() as usize];
+            let prepaid_cash = if node.get() as usize == self.grid().len() - 1 {
+                0.0
+            } else {
+                self.prepaid_cash_by_node[node.get() as usize]
+            };
             for (path, observed) in row.iter_mut().enumerate() {
                 let prepaid_forward = *observed;
                 let stock = prepaid_forward + prepaid_cash;
@@ -847,6 +901,11 @@ fn escrowed_prepaid_cash(
     let grid = schedule.grid();
     let mut prepaid = vec![0.0; grid.len()];
     let mut event = schedule.dividends().len();
+    let expiry = grid.len() - 1;
+    if event > 0 && schedule.dividends()[event - 1].node().get() as usize == expiry {
+        event -= 1;
+        prepaid[expiry] = schedule.dividends()[event].amount();
+    }
     for node in (0..grid.len() - 1).rev() {
         let interval_log_discount = curve.as_slice()[node + 1] - curve.as_slice()[node];
         let discounted_future = prepaid[node + 1] * interval_log_discount.exp();
@@ -884,7 +943,7 @@ fn escrowed_prepaid_cash(
     Ok(prepaid.into_boxed_slice())
 }
 
-/// Owned time-major pre-event states at exercise nodes and expiry.
+/// Owned time-major pre-event exercise states followed by post-event terminal expiry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimulatedPaths {
     plan: GbmPathPlan,
@@ -1110,6 +1169,37 @@ mod tests {
     }
 
     #[test]
+    fn applies_an_expiry_cash_jump_before_terminal_observation() {
+        let terminal_dividend_plan = plan(
+            &[0.0, 1.0],
+            &[0.0, 0.0],
+            Some((1, 10.0)),
+            &[],
+            DividendPolicy::Liquidator,
+        );
+        let simulated = terminal_dividend_plan.simulate(100.0, 1, &[0.0]).unwrap();
+        let terminal = 100.0 * (-0.5_f64 * 0.20_f64 * 0.20_f64).exp() - 10.0;
+        assert_exact_slice(simulated.as_slice(), &[terminal]);
+
+        let seeded = terminal_dividend_plan
+            .simulate_seeded(100.0, 1, RandomStream::new(7, 11))
+            .unwrap();
+        let no_dividend = plan(
+            &[0.0, 1.0],
+            &[0.0, 0.0],
+            None,
+            &[],
+            DividendPolicy::Liquidator,
+        )
+        .simulate_seeded(100.0, 1, RandomStream::new(7, 11))
+        .unwrap();
+        assert_exact_slice(
+            seeded.as_slice(),
+            &[(no_dividend.as_slice()[0] - 10.0).max(0.0)],
+        );
+    }
+
+    #[test]
     fn escrowed_paths_observe_pre_event_stock_and_keep_the_prepaid_forward_continuous() {
         let rate = 0.05;
         let volatility = 0.20;
@@ -1136,6 +1226,18 @@ mod tests {
                 terminal_prepaid_forward,
             ],
         );
+    }
+
+    #[test]
+    fn escrowed_expiry_observation_excludes_paid_terminal_cash() {
+        let rate = 0.0;
+        let volatility = 0.20;
+        let dividend = 10.0;
+        let plan = escrowed_plan(&[0.0, 1.0], rate, &[(1, dividend)], &[], volatility);
+        let initial_prepaid_forward = 100.0 - dividend;
+        let growth = ((rate - 0.5 * volatility * volatility) * 1.0_f64).exp();
+        let paths = plan.simulate(100.0, 1, &[0.0]).unwrap();
+        assert_exact_slice(paths.as_slice(), &[initial_prepaid_forward * growth]);
     }
 
     #[test]

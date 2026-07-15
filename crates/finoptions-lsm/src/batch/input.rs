@@ -1,6 +1,6 @@
 //! Borrowed, validated inputs and immutable method identity for call batches.
 
-use finoptions_batch::RaggedCashDividends;
+use finoptions_batch::{CashDividendRow, MaturityBoundary, RaggedCashDividends};
 use finoptions_core::DividendPolicy;
 
 use crate::{ExerciseTieRule, PolynomialRegressionSpec};
@@ -278,6 +278,8 @@ pub enum BatchDividendModel<'a> {
         schedules: RaggedCashDividends<'a>,
         /// Exact cash-jump boundary convention.
         policy: DividendPolicy,
+        /// Whether a cash jump exactly at expiry occurs before terminal payoff.
+        maturity_boundary: MaturityBoundary,
     },
     /// Escrowed approximation: risky prepaid forward plus deterministic prepaid cash.
     EscrowedCashDividends {
@@ -285,6 +287,8 @@ pub enum BatchDividendModel<'a> {
         schedules: RaggedCashDividends<'a>,
         /// Explicit meaning and any transformation of the volatility input column.
         volatility_convention: EscrowedVolatilityConvention,
+        /// Whether terminal deterministic cash belongs to the prepaid-cash decomposition.
+        maturity_boundary: MaturityBoundary,
     },
 }
 
@@ -363,30 +367,22 @@ impl<'a> BatchLsmCallInputs<'a> {
                     row,
                     annualized_decimals[row],
                 )?,
-                BatchDividendModel::CashDividends { schedules, .. }
-                | BatchDividendModel::EscrowedCashDividends { schedules, .. } => {
+                BatchDividendModel::CashDividends {
+                    schedules,
+                    maturity_boundary,
+                    ..
+                }
+                | BatchDividendModel::EscrowedCashDividends {
+                    schedules,
+                    maturity_boundary,
+                    ..
+                } => {
                     let schedule = schedules.row(row).ok_or(BatchLsmError::RowCountMismatch {
                         field: "dividend_model",
                         expected: rows,
                         observed: schedules.rows(),
                     })?;
-                    for (event, &time) in schedule.times().iter().enumerate() {
-                        if time >= maturities[row] {
-                            return Err(BatchLsmError::CashDividendOutsideContract {
-                                row,
-                                event,
-                                time,
-                                maturity: maturities[row],
-                            });
-                        }
-                        if event > 0 && schedule.times()[event - 1].to_bits() == time.to_bits() {
-                            return Err(BatchLsmError::DuplicateCashDividendTime {
-                                row,
-                                event,
-                                time,
-                            });
-                        }
-                    }
+                    validate_cash_schedule(row, maturities[row], schedule, maturity_boundary)?;
                     if let BatchDividendModel::EscrowedCashDividends {
                         volatility_convention,
                         ..
@@ -489,8 +485,16 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
                     group,
                     annualized_decimals[group],
                 )?,
-                BatchDividendModel::CashDividends { schedules, .. }
-                | BatchDividendModel::EscrowedCashDividends { schedules, .. } => {
+                BatchDividendModel::CashDividends {
+                    schedules,
+                    maturity_boundary,
+                    ..
+                }
+                | BatchDividendModel::EscrowedCashDividends {
+                    schedules,
+                    maturity_boundary,
+                    ..
+                } => {
                     let schedule = schedules
                         .row(group)
                         .ok_or(BatchLsmError::RowCountMismatch {
@@ -498,23 +502,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
                             expected: groups,
                             observed: schedules.rows(),
                         })?;
-                    for (event, &time) in schedule.times().iter().enumerate() {
-                        if time >= maturities[group] {
-                            return Err(BatchLsmError::CashDividendOutsideContract {
-                                row: group,
-                                event,
-                                time,
-                                maturity: maturities[group],
-                            });
-                        }
-                        if event > 0 && schedule.times()[event - 1].to_bits() == time.to_bits() {
-                            return Err(BatchLsmError::DuplicateCashDividendTime {
-                                row: group,
-                                event,
-                                time,
-                            });
-                        }
-                    }
+                    validate_cash_schedule(group, maturities[group], schedule, maturity_boundary)?;
                     if let BatchDividendModel::EscrowedCashDividends {
                         volatility_convention,
                         ..
@@ -560,6 +548,42 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         let end = usize::try_from(self.group_offsets[group + 1]).expect("validated group offset");
         start..end
     }
+}
+
+fn validate_cash_schedule(
+    row: usize,
+    maturity: f64,
+    schedule: CashDividendRow<'_>,
+    boundary: MaturityBoundary,
+) -> Result<(), BatchLsmError> {
+    match boundary {
+        MaturityBoundary::StrictlyBefore | MaturityBoundary::AtOrBefore => {}
+        _ => return Err(BatchLsmError::UnsupportedCashMaturityBoundary),
+    }
+    for (event, &time) in schedule.times().iter().enumerate() {
+        match time.total_cmp(&maturity) {
+            std::cmp::Ordering::Greater => {
+                return Err(BatchLsmError::CashDividendAfterMaturity {
+                    row,
+                    event,
+                    time,
+                    maturity,
+                });
+            }
+            std::cmp::Ordering::Equal if boundary == MaturityBoundary::StrictlyBefore => {
+                return Err(BatchLsmError::CashDividendAtExcludedMaturity {
+                    row,
+                    event,
+                    maturity,
+                });
+            }
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {}
+        }
+        if event > 0 && schedule.times()[event - 1].to_bits() == time.to_bits() {
+            return Err(BatchLsmError::DuplicateCashDividendTime { row, event, time });
+        }
+    }
+    Ok(())
 }
 
 fn validate_group_offsets(

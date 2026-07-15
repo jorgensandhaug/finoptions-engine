@@ -24,6 +24,7 @@ from finoptions import (
     Lsm,
     LsmBatchResult,
     LsmStrikeGroups,
+    MaturityBoundary,
     OriginExercise,
     RaggedCashDividends,
     RandomStream,
@@ -156,10 +157,15 @@ def test_one_contract_groups_match_row_batches_for_every_dividend_boundary_bitwi
     )
     for dividends in (
         inputs["dividends"],
-        CashDividendBatch(schedules=schedules, policy=DividendPolicy.SURVIVOR),
+        CashDividendBatch(
+            schedules=schedules,
+            policy=DividendPolicy.SURVIVOR,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
+        ),
         EscrowedCashDividendBatch(
             schedules=schedules,
             volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
         ),
     ):
         row = price_lsm_call_batch(
@@ -204,10 +210,15 @@ def test_every_shared_group_strike_matches_its_independent_same_population_run()
     )
     for dividends in (
         ContinuousDividendYieldBatch(annualized_decimals=np.array([0.02], dtype=np.float64)),
-        CashDividendBatch(schedules=schedules, policy=DividendPolicy.LIQUIDATOR),
+        CashDividendBatch(
+            schedules=schedules,
+            policy=DividendPolicy.LIQUIDATOR,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
+        ),
         EscrowedCashDividendBatch(
             schedules=schedules,
             volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
         ),
     ):
         grouped = price_lsm_call_grouped_batch(
@@ -389,6 +400,7 @@ def test_cash_batch_inserts_exact_events_and_is_thread_invariant() -> None:
             amounts=np.array([1.0, 1.0, 2.0], dtype=np.float64),
         ),
         policy=DividendPolicy.SURVIVOR,
+        maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
     )
     common: BatchInputs = {
         "initial_spots": np.array([100.0, 120.0], dtype=np.float64),
@@ -451,6 +463,7 @@ def test_escrowed_batch_is_thread_invariant_and_volatility_semantics_are_explici
         dividends=EscrowedCashDividendBatch(
             schedules=schedules,
             volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
         ),
         executor=CpuExecutor(threads=1),
     )
@@ -460,6 +473,7 @@ def test_escrowed_batch_is_thread_invariant_and_volatility_semantics_are_explici
         dividends=EscrowedCashDividendBatch(
             schedules=schedules,
             volatility_convention=EscrowedVolatilityConvention.PREPAID_FORWARD,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
         ),
         executor=CpuExecutor(threads=4),
     )
@@ -482,6 +496,7 @@ def test_escrowed_batch_fails_before_simulation_when_cash_exhausts_spot() -> Non
                     amounts=np.array([100.0], dtype=np.float64),
                 ),
                 volatility_convention=EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN,
+                maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
             ),
             mesh=mesh(),
             method=method(),
@@ -504,6 +519,7 @@ def test_included_origin_is_one_common_pre_event_exercise_decision() -> None:
                 amounts=np.array([200.0], dtype=np.float64),
             ),
             policy=DividendPolicy.LIQUIDATOR,
+            maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
         ),
         mesh=mesh(origin=OriginExercise.INCLUDED),
         executor=CpuExecutor(threads=2),
@@ -565,6 +581,7 @@ def test_array_layout_random_intervals_and_cash_boundaries_fail_early() -> None:
             amounts=np.array([1.0, 2.0], dtype=np.float64),
         ),
         policy=DividendPolicy.LIQUIDATOR,
+        maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
     )
     duplicate_inputs = one_row.copy()
     duplicate_inputs["dividends"] = duplicate
@@ -578,11 +595,22 @@ def test_array_layout_random_intervals_and_cash_boundaries_fail_early() -> None:
             amounts=np.array([1.0], dtype=np.float64),
         ),
         policy=DividendPolicy.LIQUIDATOR,
+        maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
     )
     expiry_inputs = one_row.copy()
     expiry_inputs["dividends"] = at_expiry
-    with pytest.raises(InputError, match="strictly before maturity"):
+    with pytest.raises(InputError, match="declared boundary is strictly-before"):
         price_lsm_call_batch(**expiry_inputs, executor=CpuExecutor(threads=1))
+
+    admitted_inputs = one_row.copy()
+    admitted_inputs["dividends"] = CashDividendBatch(
+        schedules=at_expiry.schedules,
+        policy=DividendPolicy.LIQUIDATOR,
+        maturity_boundary=MaturityBoundary.AT_OR_BEFORE,
+    )
+    admitted = price_lsm_call_batch(**admitted_inputs, executor=CpuExecutor(threads=1))
+    assert admitted.rows == 1
+    assert np.isfinite(admitted.prices[0])
 
 
 def test_mutated_numpy_values_are_revalidated_by_the_native_financial_boundary() -> None:
@@ -603,6 +631,7 @@ def test_mutated_numpy_values_are_revalidated_by_the_native_financial_boundary()
             amounts=cash_amounts,
         ),
         policy=DividendPolicy.LIQUIDATOR,
+        maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
     )
     cash_amounts[0] = -1.0
     with pytest.raises(InputError, match=r"cash-dividend amount at row 0, event 0"):

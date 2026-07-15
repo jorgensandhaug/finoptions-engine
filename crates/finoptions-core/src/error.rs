@@ -197,9 +197,9 @@ pub enum InputError {
         node: u32,
     },
 
-    /// A cash dividend is attached at valuation or at/after expiry.
+    /// A cash dividend is attached at valuation or after expiry.
     #[error(
-        "cash dividend at node {node} must occur strictly after valuation and before expiry node {expiry}"
+        "cash dividend at node {node} must occur strictly after valuation and no later than expiry node {expiry}"
     )]
     InvalidDividendNode {
         /// Invalid dividend node.

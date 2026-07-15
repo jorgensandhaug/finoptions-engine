@@ -124,11 +124,11 @@ pub enum BatchLsmError {
         evaluation_end: u64,
     },
 
-    /// A cash event is not strictly before its contract expiry.
+    /// A cash event occurs after its contract expiry.
     #[error(
-        "cash dividend at batch row {row}, event {event}, time {time:?} must occur strictly before maturity {maturity:?}"
+        "cash dividend at batch row {row}, event {event}, time {time:?} occurs after maturity {maturity:?}"
     )]
-    CashDividendOutsideContract {
+    CashDividendAfterMaturity {
         /// Zero-based contract row.
         row: usize,
         /// Zero-based event within the row.
@@ -138,6 +138,23 @@ pub enum BatchLsmError {
         /// Contract maturity year fraction.
         maturity: f64,
     },
+
+    /// A cash event equals maturity under a strict-before request.
+    #[error(
+        "cash dividend at batch row {row}, event {event} equals maturity {maturity:?}, but the declared boundary is strictly-before"
+    )]
+    CashDividendAtExcludedMaturity {
+        /// Zero-based contract row.
+        row: usize,
+        /// Zero-based event within the row.
+        event: usize,
+        /// Contract maturity and event year fraction.
+        maturity: f64,
+    },
+
+    /// The linked batch crate supplied a maturity boundary this engine does not implement.
+    #[error("cash-dividend maturity boundary is unsupported by this LSM engine")]
+    UnsupportedCashMaturityBoundary,
 
     /// Two deterministic cash declarations share one exact event time.
     #[error(

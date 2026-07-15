@@ -7,8 +7,8 @@ use crate::{CashDividend, InputError, NodeId, TimeGrid};
 /// Event phases attached to one node, interpreted in field order.
 ///
 /// If both `exercise` and `dividend` are present, exercise occurs in the pre-dividend state and the
-/// cash jump follows it. `expiry` is structurally exclusive because expiry must be the final node
-/// and dividends/exercise decisions must precede it in the first supported slice.
+/// cash jump follows it. At the terminal node, an admitted cash jump occurs before the separately
+/// ordered expiry payoff; exercise remains structurally excluded there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NodePhases<'a> {
     /// Whether the holder may exercise in the node's pre-dividend state.
@@ -32,8 +32,8 @@ impl EventSchedule {
     /// Validates an event schedule without moving, merging, or dropping events.
     ///
     /// Dividends and exercise nodes must already be strictly increasing. A shared
-    /// exercise/dividend node means exercise first and the cash jump second. The final node is
-    /// terminal payoff, not another regression decision.
+    /// exercise/dividend node means exercise first and the cash jump second. A final-node cash jump
+    /// occurs before terminal payoff; the final node is never another regression decision.
     ///
     /// # Errors
     ///
@@ -57,7 +57,7 @@ impl EventSchedule {
         let dividends = dividends.into();
         for (index, dividend) in dividends.iter().enumerate() {
             let node = dividend.node().get();
-            if node == 0 || node >= expiry.get() {
+            if node == 0 || node > expiry.get() {
                 return Err(InputError::InvalidDividendNode {
                     node,
                     expiry: expiry.get(),
@@ -174,6 +174,23 @@ mod tests {
             NodePhases {
                 exercise: false,
                 dividend: None,
+                expiry: true,
+            }
+        );
+    }
+
+    #[test]
+    fn orders_an_expiry_cash_jump_before_terminal_payoff() {
+        let grid = grid();
+        let expiry = grid.node_id(3).unwrap();
+        let dividend = CashDividend::try_new(expiry, 2.0).unwrap();
+        let schedule = EventSchedule::try_new(grid, [dividend], [], expiry).unwrap();
+
+        assert_eq!(
+            schedule.phases(expiry).unwrap(),
+            NodePhases {
+                exercise: false,
+                dividend: Some(&dividend),
                 expiry: true,
             }
         );

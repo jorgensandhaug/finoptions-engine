@@ -181,7 +181,9 @@ impl IntoPyBatchLsmError for CoreBatchLsmError {
             | CoreBatchLsmError::PathCountOutsideDomain { .. }
             | CoreBatchLsmError::RandomDomainRangeOverflow { .. }
             | CoreBatchLsmError::RandomDomainRangeCollision { .. }
-            | CoreBatchLsmError::CashDividendOutsideContract { .. }
+            | CoreBatchLsmError::CashDividendAfterMaturity { .. }
+            | CoreBatchLsmError::CashDividendAtExcludedMaturity { .. }
+            | CoreBatchLsmError::UnsupportedCashMaturityBoundary
             | CoreBatchLsmError::DuplicateCashDividendTime { .. }
             | CoreBatchLsmError::NonFiniteEscrowedPrepaidCash { .. }
             | CoreBatchLsmError::NonPositiveEscrowedPrepaidForward { .. }
@@ -1096,6 +1098,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     dividend_times: PyReadonlyArray1<'py, f64>,
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     dividend_policy: &str,
+    maturity_boundary: &str,
     base_intervals: u32,
     origin_exercise: &str,
     executor: PyRef<'py, NativeCpuExecutor>,
@@ -1122,6 +1125,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     let dividend_times = dividend_times.as_slice()?;
     let dividend_amounts = dividend_amounts.as_slice()?;
     let dividend_policy = parse_dividend_policy(dividend_policy)?;
+    let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
         base_intervals,
         origin_exercise,
@@ -1150,6 +1154,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
                 CoreBatchDividendModel::CashDividends {
                     schedules,
                     policy: dividend_policy,
+                    maturity_boundary,
                 },
                 method,
                 core_executor,
@@ -1172,6 +1177,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
     dividend_times: PyReadonlyArray1<'py, f64>,
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     volatility_convention: &str,
+    maturity_boundary: &str,
     base_intervals: u32,
     origin_exercise: &str,
     executor: PyRef<'py, NativeCpuExecutor>,
@@ -1198,6 +1204,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
     let dividend_times = dividend_times.as_slice()?;
     let dividend_amounts = dividend_amounts.as_slice()?;
     let volatility_convention = parse_escrowed_volatility_convention(volatility_convention)?;
+    let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
         base_intervals,
         origin_exercise,
@@ -1226,6 +1233,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
                 CoreBatchDividendModel::EscrowedCashDividends {
                     schedules,
                     volatility_convention,
+                    maturity_boundary,
                 },
                 method,
                 core_executor,
@@ -1313,6 +1321,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
     dividend_times: PyReadonlyArray1<'py, f64>,
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     dividend_policy: &str,
+    maturity_boundary: &str,
     base_intervals: u32,
     origin_exercise: &str,
     executor: PyRef<'py, NativeCpuExecutor>,
@@ -1340,6 +1349,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
     let dividend_times = dividend_times.as_slice()?;
     let dividend_amounts = dividend_amounts.as_slice()?;
     let dividend_policy = parse_dividend_policy(dividend_policy)?;
+    let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
         base_intervals,
         origin_exercise,
@@ -1368,6 +1378,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
                 CoreBatchDividendModel::CashDividends {
                     schedules,
                     policy: dividend_policy,
+                    maturity_boundary,
                 },
                 method,
                 core_executor,
@@ -1391,6 +1402,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
     dividend_times: PyReadonlyArray1<'py, f64>,
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     volatility_convention: &str,
+    maturity_boundary: &str,
     base_intervals: u32,
     origin_exercise: &str,
     executor: PyRef<'py, NativeCpuExecutor>,
@@ -1418,6 +1430,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
     let dividend_times = dividend_times.as_slice()?;
     let dividend_amounts = dividend_amounts.as_slice()?;
     let volatility_convention = parse_escrowed_volatility_convention(volatility_convention)?;
+    let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
         base_intervals,
         origin_exercise,
@@ -1446,6 +1459,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
                 CoreBatchDividendModel::EscrowedCashDividends {
                     schedules,
                     volatility_convention,
+                    maturity_boundary,
                 },
                 method,
                 core_executor,

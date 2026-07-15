@@ -194,9 +194,11 @@ Rows receive disjoint, addressable random domains. Exact cash schedules use `Cas
 The distinct prepaid-forward approximation uses `EscrowedCashDividendBatch` and requires either
 `EscrowedVolatilityConvention.PREPAID_FORWARD` or
 `EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN`; no dividend representation or volatility
-meaning is inferred. Parallel and serial execution of an identical request are bitwise equivalent,
-while independent numerical methods are validated by financial identities, bounds, convergence,
-and justified tolerances rather than forced equality.
+meaning is inferred. Both cash representations also require `MaturityBoundary`: `STRICTLY_BEFORE`
+rejects an event equal to expiry, while `AT_OR_BEFORE` orders an equal-time cash jump before the
+terminal payoff. Events are never clipped or shifted. Parallel and serial execution of an identical
+request are bitwise equivalent, while independent numerical methods are validated by financial
+identities, bounds, convergence, and justified tolerances rather than forced equality.
 
 When several strikes share one exact simulated state, use `LsmStrikeGroups` and
 `price_lsm_call_grouped_batch`. Group offsets and compact state columns are explicit NumPy buffers;
