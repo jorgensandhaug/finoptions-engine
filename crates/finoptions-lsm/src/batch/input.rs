@@ -66,6 +66,45 @@ impl UniformExerciseMesh {
     }
 }
 
+/// Exercise only immediately before strictly pre-expiry deterministic cash dividends.
+///
+/// This mesh is financially admissible only for fixed-strike calls with no proportional yield,
+/// nonnegative discount rates, and deterministic cash events strictly before expiry. Batch plan
+/// construction validates that complete domain before simulation. Valuation origin is not an
+/// exercise node because it is not a cash-event left limit.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct CashDividendExerciseMesh;
+
+impl CashDividendExerciseMesh {
+    /// Constructs the field-free typed mesh identity.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+/// Closed exercise-opportunity identities admitted by call batches.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum BatchExerciseMesh {
+    /// Uniform Bermudan base dates plus exact cash-event dates.
+    Uniform(UniformExerciseMesh),
+    /// Only left limits of strictly pre-expiry deterministic cash events.
+    CashDividendDates(CashDividendExerciseMesh),
+}
+
+impl From<UniformExerciseMesh> for BatchExerciseMesh {
+    fn from(value: UniformExerciseMesh) -> Self {
+        Self::Uniform(value)
+    }
+}
+
+impl From<CashDividendExerciseMesh> for BatchExerciseMesh {
+    fn from(value: CashDividendExerciseMesh) -> Self {
+        Self::CashDividendDates(value)
+    }
+}
+
 /// Row-addressed independent random namespaces for fitting and evaluation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BatchRandomStreams {
@@ -175,7 +214,7 @@ fn domain_end(population: &'static str, start: u32, rows: usize) -> Result<u64, 
 /// Complete numerical and random identity for one independently evaluated LSM call batch.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BatchLsmCallMethod {
-    mesh: UniformExerciseMesh,
+    exercise_mesh: BatchExerciseMesh,
     training_paths: usize,
     evaluation_paths: usize,
     regression: PolynomialRegressionSpec,
@@ -200,6 +239,52 @@ impl BatchLsmCallMethod {
         insufficient_exercise_support: InsufficientExerciseSupportPolicy,
         random_streams: BatchRandomStreams,
     ) -> Result<Self, BatchLsmError> {
+        Self::try_new_with_exercise_mesh(
+            mesh.into(),
+            training_paths,
+            evaluation_paths,
+            regression,
+            tie_rule,
+            insufficient_exercise_support,
+            random_streams,
+        )
+    }
+
+    /// Validates a cash-dividend-date method without inferring a uniform mesh.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed path-count failure. Financial theorem-domain checks occur against every
+    /// batch row before its path plan is constructed.
+    pub fn try_new_cash_dividend_dates(
+        mesh: CashDividendExerciseMesh,
+        training_paths: usize,
+        evaluation_paths: usize,
+        regression: PolynomialRegressionSpec,
+        tie_rule: ExerciseTieRule,
+        insufficient_exercise_support: InsufficientExerciseSupportPolicy,
+        random_streams: BatchRandomStreams,
+    ) -> Result<Self, BatchLsmError> {
+        Self::try_new_with_exercise_mesh(
+            mesh.into(),
+            training_paths,
+            evaluation_paths,
+            regression,
+            tie_rule,
+            insufficient_exercise_support,
+            random_streams,
+        )
+    }
+
+    fn try_new_with_exercise_mesh(
+        exercise_mesh: BatchExerciseMesh,
+        training_paths: usize,
+        evaluation_paths: usize,
+        regression: PolynomialRegressionSpec,
+        tie_rule: ExerciseTieRule,
+        insufficient_exercise_support: InsufficientExerciseSupportPolicy,
+        random_streams: BatchRandomStreams,
+    ) -> Result<Self, BatchLsmError> {
         validate_path_count("training", training_paths)?;
         validate_path_count("evaluation", evaluation_paths)?;
         if evaluation_paths < 2 {
@@ -208,7 +293,7 @@ impl BatchLsmCallMethod {
             });
         }
         Ok(Self {
-            mesh,
+            exercise_mesh,
             training_paths,
             evaluation_paths,
             regression,
@@ -218,10 +303,19 @@ impl BatchLsmCallMethod {
         })
     }
 
-    /// Returns the exact base exercise mesh.
+    /// Returns the exact exercise-opportunity identity.
     #[must_use]
-    pub const fn mesh(self) -> UniformExerciseMesh {
-        self.mesh
+    pub const fn exercise_mesh(self) -> BatchExerciseMesh {
+        self.exercise_mesh
+    }
+
+    /// Returns the uniform mesh only when that exact opportunity identity was declared.
+    #[must_use]
+    pub const fn uniform_mesh(self) -> Option<UniformExerciseMesh> {
+        match self.exercise_mesh {
+            BatchExerciseMesh::Uniform(mesh) => Some(mesh),
+            BatchExerciseMesh::CashDividendDates(_) => None,
+        }
     }
 
     /// Returns the fitting population size per contract.

@@ -17,3 +17,6 @@ repository.
 - [ADR 0011: Explicit escrowed cash-dividend approximation](0011-explicit-escrowed-cash-dividends.md)
 - [ADR 0012: Explicit Apple vector-math backend](0012-explicit-apple-vector-math.md)
 - [ADR 0013: Group-addressed strike LSM with shared path populations](0013-group-addressed-strike-lsm.md)
+- [ADR 0014: Terminal cash-event order](0014-terminal-cash-event-order.md)
+- [ADR 0015: Explicit insufficient-exercise-support policy](0015-explicit-insufficient-exercise-support.md)
+- [ADR 0016: Explicit cash-dividend-date exercise mesh](0016-cash-dividend-date-exercise-mesh.md)

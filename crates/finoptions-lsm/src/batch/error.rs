@@ -78,6 +78,34 @@ pub enum BatchLsmError {
     #[error("LSM uniform exercise mesh must contain at least one base interval")]
     EmptyBaseIntervals,
 
+    /// The cash-dividend-date theorem mesh was paired with a proportional-yield model.
+    #[error("cash-dividend-date exercise mesh requires a deterministic cash-dividend model")]
+    CashDividendExerciseMeshRequiresCashDividends,
+
+    /// Deferring call exercise between cash events is not guaranteed under a negative rate.
+    #[error(
+        "cash-dividend-date exercise mesh requires a nonnegative continuously compounded rate at batch row {row}; observed {rate:?}"
+    )]
+    NegativeRateForCashDividendExerciseMesh {
+        /// Zero-based contract or group row.
+        row: usize,
+        /// Supplied constant continuously compounded annual rate.
+        rate: f64,
+    },
+
+    /// A terminal cash event needs a separately represented left-limit exercise phase.
+    #[error(
+        "cash-dividend-date exercise mesh does not admit terminal cash at batch row {row}, event {event}; event and maturity are {maturity:?}"
+    )]
+    TerminalCashForCashDividendExerciseMesh {
+        /// Zero-based contract or group row.
+        row: usize,
+        /// Zero-based event within the cash schedule.
+        event: usize,
+        /// Shared event and maturity year fraction.
+        maturity: f64,
+    },
+
     /// Independent evaluation cannot report sampling dispersion from one path.
     #[error("batched LSM evaluation requires at least two paths; observed {observed}")]
     InsufficientEvaluationPaths {

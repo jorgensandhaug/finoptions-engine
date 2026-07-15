@@ -76,6 +76,15 @@ class UniformExerciseMesh:
 
 
 @dataclass(frozen=True, slots=True)
+class CashDividendExerciseMesh:
+    """Exercise only at left limits of strictly pre-expiry deterministic cash events.
+
+    Native pricing requires a cash-dividend model, nonnegative rates, and no cash event at expiry.
+    Any row outside that complete theorem domain fails; it is not moved to a uniform mesh.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class ContinuousDividendYieldBatch:
     """One constant nonnegative annualized proportional yield per option row."""
 
@@ -139,6 +148,22 @@ class EscrowedCashDividendBatch:
 
 
 type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch | EscrowedCashDividendBatch
+type ExerciseMesh = UniformExerciseMesh | CashDividendExerciseMesh
+
+
+def _native_mesh_arguments(mesh: ExerciseMesh) -> tuple[str, int | None, str | None]:
+    if type(mesh) is UniformExerciseMesh:
+        return ("uniform", mesh.base_intervals, mesh.origin_exercise.value)
+    if type(mesh) is CashDividendExerciseMesh:
+        return ("cash_dividend_dates", None, None)
+    msg = "exercise mesh changed type after request validation"
+    raise LsmError(msg)
+
+
+def _validate_mesh_dividends(*, mesh: ExerciseMesh, dividends: BatchDividends) -> None:
+    if type(mesh) is CashDividendExerciseMesh and type(dividends) is ContinuousDividendYieldBatch:
+        msg = "CashDividendExerciseMesh requires cash-dividend inputs"
+        raise InputError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +276,7 @@ def _validate_request(  # noqa: PLR0913 - each financial column is independently
     rates: Float64Vector,
     volatilities: Float64Vector,
     dividends: BatchDividends,
-    mesh: UniformExerciseMesh,
+    mesh: ExerciseMesh,
     executor: CpuExecutor,
     method: Lsm,
 ) -> None:
@@ -273,9 +298,10 @@ def _validate_request(  # noqa: PLR0913 - each financial column is independently
             "or EscrowedCashDividendBatch"
         )
         raise InputError(msg)
-    if type(mesh) is not UniformExerciseMesh:
-        msg = "mesh must be UniformExerciseMesh"
+    if type(mesh) not in (UniformExerciseMesh, CashDividendExerciseMesh):
+        msg = "mesh must be UniformExerciseMesh or CashDividendExerciseMesh"
         raise InputError(msg)
+    _validate_mesh_dividends(mesh=mesh, dividends=dividends)
     if type(executor) is not CpuExecutor:
         msg = "executor must be CpuExecutor"
         raise InputError(msg)
@@ -338,15 +364,16 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
     rates: Float64Vector,
     volatilities: Float64Vector,
     dividends: BatchDividends,
-    mesh: UniformExerciseMesh,
+    mesh: ExerciseMesh,
     executor: CpuExecutor,
     method: Lsm,
 ) -> LsmBatchResult:
     """Price constant-parameter Bermudan calls using native contract-parallel LSM.
 
     `rates` are constant continuously compounded annual decimals. `volatilities` are positive
-    annual decimals. The uniform mesh is augmented by every exact cash-event time, and exercise is
-    observed before a same-time cash jump. Each row uses `method.training_stream.domain + row` and
+    annual decimals. A uniform mesh is augmented by every exact cash-event time. The specialized
+    cash mesh admits only strictly pre-expiry cash-event left limits under nonnegative rates. Each
+    row uses `method.training_stream.domain + row` and
     `method.evaluation_stream.domain + row`; the native boundary rejects overflow or overlap.
 
     Input arrays are borrowed without dtype, layout, or ownership conversion. Do not mutate them
@@ -378,8 +405,7 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
         volatilities,
     )
     method_arguments = (
-        mesh.base_intervals,
-        mesh.origin_exercise.value,
+        *_native_mesh_arguments(mesh),
         executor._handle,  # noqa: SLF001 - facade owns the private native resource
         method.training_paths,
         method.evaluation_paths,
@@ -435,7 +461,7 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
 def price_lsm_call_grouped_batch(
     *,
     groups: LsmStrikeGroups,
-    mesh: UniformExerciseMesh,
+    mesh: ExerciseMesh,
     executor: CpuExecutor,
     method: Lsm,
 ) -> LsmBatchResult:
@@ -458,8 +484,8 @@ def price_lsm_call_grouped_batch(
     if type(groups) is not LsmStrikeGroups:
         msg = "groups must be LsmStrikeGroups"
         raise InputError(msg)
-    if type(mesh) is not UniformExerciseMesh:
-        msg = "mesh must be UniformExerciseMesh"
+    if type(mesh) not in (UniformExerciseMesh, CashDividendExerciseMesh):
+        msg = "mesh must be UniformExerciseMesh or CashDividendExerciseMesh"
         raise InputError(msg)
     if type(executor) is not CpuExecutor:
         msg = "executor must be CpuExecutor"
@@ -470,6 +496,7 @@ def price_lsm_call_grouped_batch(
     if method.evaluation_paths < _MIN_EVALUATION_PATHS:
         msg = "grouped batched LSM requires at least two independent evaluation paths"
         raise InputError(msg)
+    _validate_mesh_dividends(mesh=mesh, dividends=groups.dividends)
 
     common = (
         groups.group_offsets,
@@ -480,8 +507,7 @@ def price_lsm_call_grouped_batch(
         groups.volatilities,
     )
     method_arguments = (
-        mesh.base_intervals,
-        mesh.origin_exercise.value,
+        *_native_mesh_arguments(mesh),
         executor._handle,  # noqa: SLF001 - facade owns the private native resource
         method.training_paths,
         method.evaluation_paths,
@@ -538,9 +564,11 @@ def price_lsm_call_grouped_batch(
 __all__ = [
     "BatchDividends",
     "CashDividendBatch",
+    "CashDividendExerciseMesh",
     "ContinuousDividendYieldBatch",
     "EscrowedCashDividendBatch",
     "EscrowedVolatilityConvention",
+    "ExerciseMesh",
     "LsmBatchResult",
     "LsmStrikeGroups",
     "OriginExercise",

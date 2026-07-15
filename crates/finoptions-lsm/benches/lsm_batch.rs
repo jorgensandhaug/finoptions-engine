@@ -9,9 +9,9 @@ use finoptions_core::{
 };
 use finoptions_lsm::{
     BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams,
-    ExerciseTieRule, GroupedBatchLsmCallInputs, InsufficientExerciseSupportPolicy,
-    LsmCallEstimator, OriginExercise, PolynomialDegree, PolynomialRegressionSpec,
-    UniformExerciseMesh,
+    CashDividendExerciseMesh, ExerciseTieRule, GroupedBatchLsmCallInputs,
+    InsufficientExerciseSupportPolicy, LsmCallEstimator, OriginExercise, PolynomialDegree,
+    PolynomialRegressionSpec, UniformExerciseMesh,
 };
 use finoptions_sim::{CpuExecutor, CpuMathBackend, GbmPathPlan, RandomStream};
 
@@ -296,6 +296,24 @@ fn batch_method() -> BatchLsmCallMethod {
     .unwrap()
 }
 
+fn cash_dividend_date_method() -> BatchLsmCallMethod {
+    BatchLsmCallMethod::try_new_cash_dividend_dates(
+        CashDividendExerciseMesh::new(),
+        TRAINING_PATHS,
+        EVALUATION_PATHS,
+        regression(),
+        ExerciseTieRule::StrictlyGreater,
+        InsufficientExerciseSupportPolicy::Fail,
+        BatchRandomStreams::new(
+            TRAINING_SEED,
+            EVALUATION_SEED,
+            TRAINING_DOMAIN_START,
+            EVALUATION_DOMAIN_START,
+        ),
+    )
+    .unwrap()
+}
+
 fn scalar_repeated(workload: &Workload, executor: &CpuExecutor) -> f64 {
     let mut price_sum = 0.0;
     for row in 0..workload.rows() {
@@ -327,6 +345,46 @@ fn scalar_repeated(workload: &Workload, executor: &CpuExecutor) -> f64 {
         price_sum += black_box(run.evaluation().price());
     }
     price_sum
+}
+
+fn benchmark_cash_dividend_dates(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("project_grouped_cash_dividend_dates_500_lsm");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    #[cfg(target_os = "macos")]
+    let backends = [
+        ("rust_std_f64", CpuMathBackend::RustStdF64),
+        ("apple_accelerate", CpuMathBackend::AppleAccelerate),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let backends = [("rust_std_f64", CpuMathBackend::RustStdF64)];
+    for groups in [32, 128] {
+        let workload = StrikeGroupWorkload::new(groups, 7);
+        group.throughput(Throughput::Elements(
+            u64::try_from(workload.rows()).unwrap(),
+        ));
+        for threads in [1, 8] {
+            for &(backend_name, backend) in &backends {
+                let executor = CpuExecutor::try_new_with_math_backend(threads, backend).unwrap();
+                group.bench_with_input(
+                    BenchmarkId::new(format!("grouped_{backend_name}_{threads}t"), groups),
+                    &groups,
+                    |bencher, _| {
+                        bencher.iter(|| {
+                            black_box(
+                                workload
+                                    .grouped_inputs()
+                                    .price(cash_dividend_date_method(), black_box(&executor))
+                                    .unwrap(),
+                            );
+                        });
+                    },
+                );
+            }
+        }
+    }
+    group.finish();
 }
 
 fn benchmark(criterion: &mut Criterion) {
@@ -417,6 +475,8 @@ fn benchmark(criterion: &mut Criterion) {
         }
     }
     group.finish();
+
+    benchmark_cash_dividend_dates(criterion);
 }
 
 criterion_group!(benches, benchmark);

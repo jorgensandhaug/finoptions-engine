@@ -15,6 +15,7 @@ use finoptions_lsm::{
     BatchDividendModel as CoreBatchDividendModel, BatchLsmCallInputs as CoreBatchLsmCallInputs,
     BatchLsmCallMethod as CoreBatchLsmCallMethod, BatchLsmCallResult as CoreBatchLsmCallResult,
     BatchLsmError as CoreBatchLsmError, BatchRandomStreams as CoreBatchRandomStreams,
+    CashDividendExerciseMesh as CoreCashDividendExerciseMesh,
     EscrowedVolatilityConvention as CoreEscrowedVolatilityConvention,
     ExerciseFitDiagnostics as CoreExerciseFitDiagnostics, ExerciseTieRule as CoreExerciseTieRule,
     GroupedBatchLsmCallInputs as CoreGroupedBatchLsmCallInputs,
@@ -178,6 +179,9 @@ impl IntoPyBatchLsmError for CoreBatchLsmError {
             | CoreBatchLsmError::GroupOffsetEndMismatch { .. }
             | CoreBatchLsmError::InvalidRowValue { .. }
             | CoreBatchLsmError::EmptyBaseIntervals
+            | CoreBatchLsmError::CashDividendExerciseMeshRequiresCashDividends
+            | CoreBatchLsmError::NegativeRateForCashDividendExerciseMesh { .. }
+            | CoreBatchLsmError::TerminalCashForCashDividendExerciseMesh { .. }
             | CoreBatchLsmError::InsufficientEvaluationPaths { .. }
             | CoreBatchLsmError::PathCountOutsideDomain { .. }
             | CoreBatchLsmError::RandomDomainRangeOverflow { .. }
@@ -922,8 +926,9 @@ impl NativeGroupedBatchColumns<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn parse_batch_lsm_method(
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     training_paths: usize,
     evaluation_paths: usize,
     training_seed: u64,
@@ -936,28 +941,65 @@ fn parse_batch_lsm_method(
     tie_rule: &str,
     insufficient_exercise_support: &str,
 ) -> PyResult<CoreBatchLsmCallMethod> {
-    let mesh =
-        CoreUniformExerciseMesh::try_new(base_intervals, parse_origin_exercise(origin_exercise)?)
-            .map_err(CoreBatchLsmError::into_py_batch_lsm_error)?;
     let degree = CorePolynomialDegree::try_new(polynomial_degree)
         .map_err(|error| LsmError::new_err(error.to_string()))?;
     let regression = CorePolynomialRegressionSpec::try_new(degree, rank_tolerance, condition_limit)
         .map_err(|error| LsmError::new_err(error.to_string()))?;
-    CoreBatchLsmCallMethod::try_new(
-        mesh,
-        training_paths,
-        evaluation_paths,
-        regression,
-        parse_exercise_tie_rule(tie_rule)?,
-        parse_insufficient_exercise_support(insufficient_exercise_support)?,
-        CoreBatchRandomStreams::new(
-            training_seed,
-            evaluation_seed,
-            training_domain_start,
-            evaluation_domain_start,
-        ),
-    )
-    .map_err(CoreBatchLsmError::into_py_batch_lsm_error)
+    let tie_rule = parse_exercise_tie_rule(tie_rule)?;
+    let insufficient_exercise_support =
+        parse_insufficient_exercise_support(insufficient_exercise_support)?;
+    let random_streams = CoreBatchRandomStreams::new(
+        training_seed,
+        evaluation_seed,
+        training_domain_start,
+        evaluation_domain_start,
+    );
+    let method = match exercise_mesh {
+        "uniform" => {
+            let base_intervals = base_intervals.ok_or_else(|| {
+                InputError::new_err("uniform exercise mesh requires base_intervals")
+            })?;
+            let origin_exercise = origin_exercise.ok_or_else(|| {
+                InputError::new_err("uniform exercise mesh requires origin_exercise")
+            })?;
+            let mesh = CoreUniformExerciseMesh::try_new(
+                base_intervals,
+                parse_origin_exercise(origin_exercise)?,
+            )
+            .map_err(CoreBatchLsmError::into_py_batch_lsm_error)?;
+            CoreBatchLsmCallMethod::try_new(
+                mesh,
+                training_paths,
+                evaluation_paths,
+                regression,
+                tie_rule,
+                insufficient_exercise_support,
+                random_streams,
+            )
+        }
+        "cash_dividend_dates" => {
+            if base_intervals.is_some() || origin_exercise.is_some() {
+                return Err(InputError::new_err(
+                    "cash-dividend-date exercise mesh forbids uniform mesh fields",
+                ));
+            }
+            CoreBatchLsmCallMethod::try_new_cash_dividend_dates(
+                CoreCashDividendExerciseMesh::new(),
+                training_paths,
+                evaluation_paths,
+                regression,
+                tie_rule,
+                insufficient_exercise_support,
+                random_streams,
+            )
+        }
+        observed => {
+            return Err(InputError::new_err(format!(
+                "unsupported batched LSM exercise mesh {observed:?}"
+            )));
+        }
+    };
+    method.map_err(CoreBatchLsmError::into_py_batch_lsm_error)
 }
 
 type NativeBatchLsmResult<'py> = (
@@ -1079,8 +1121,9 @@ fn price_lsm_call_batch_continuous_yield_f64<'py>(
     constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
     constant_volatilities: PyReadonlyArray1<'py, f64>,
     annualized_dividend_yields: PyReadonlyArray1<'py, f64>,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1104,6 +1147,7 @@ fn price_lsm_call_batch_continuous_yield_f64<'py>(
     };
     let annualized_dividend_yields = annualized_dividend_yields.as_slice()?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,
@@ -1147,8 +1191,9 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     dividend_policy: &str,
     maturity_boundary: &str,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1176,6 +1221,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     let dividend_policy = parse_dividend_policy(dividend_policy)?;
     let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,
@@ -1228,8 +1274,9 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     volatility_convention: &str,
     maturity_boundary: &str,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1257,6 +1304,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
     let volatility_convention = parse_escrowed_volatility_convention(volatility_convention)?;
     let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,
@@ -1306,8 +1354,9 @@ fn price_lsm_call_grouped_batch_continuous_yield_f64<'py>(
     constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
     constant_volatilities: PyReadonlyArray1<'py, f64>,
     annualized_dividend_yields: PyReadonlyArray1<'py, f64>,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1332,6 +1381,7 @@ fn price_lsm_call_grouped_batch_continuous_yield_f64<'py>(
     };
     let annualized_dividend_yields = annualized_dividend_yields.as_slice()?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,
@@ -1376,8 +1426,9 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     dividend_policy: &str,
     maturity_boundary: &str,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1406,6 +1457,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
     let dividend_policy = parse_dividend_policy(dividend_policy)?;
     let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,
@@ -1459,8 +1511,9 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
     dividend_amounts: PyReadonlyArray1<'py, f64>,
     volatility_convention: &str,
     maturity_boundary: &str,
-    base_intervals: u32,
-    origin_exercise: &str,
+    exercise_mesh: &str,
+    base_intervals: Option<u32>,
+    origin_exercise: Option<&str>,
     executor: PyRef<'py, NativeCpuExecutor>,
     training_paths: usize,
     evaluation_paths: usize,
@@ -1489,6 +1542,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
     let volatility_convention = parse_escrowed_volatility_convention(volatility_convention)?;
     let maturity_boundary = parse_maturity_boundary(maturity_boundary)?;
     let method = parse_batch_lsm_method(
+        exercise_mesh,
         base_intervals,
         origin_exercise,
         training_paths,

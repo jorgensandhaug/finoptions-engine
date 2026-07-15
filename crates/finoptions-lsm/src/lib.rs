@@ -15,9 +15,10 @@ pub use regression::{
 };
 
 pub use batch::{
-    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmCallResult,
-    BatchLsmCallRowResult, BatchLsmError, BatchRandomStreams, EscrowedVolatilityConvention,
-    GroupedBatchLsmCallInputs, OriginExercise, UniformExerciseMesh,
+    BatchDividendModel, BatchExerciseMesh, BatchLsmCallInputs, BatchLsmCallMethod,
+    BatchLsmCallResult, BatchLsmCallRowResult, BatchLsmError, BatchRandomStreams,
+    CashDividendExerciseMesh, EscrowedVolatilityConvention, GroupedBatchLsmCallInputs,
+    OriginExercise, UniformExerciseMesh,
 };
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]

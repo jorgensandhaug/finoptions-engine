@@ -10,6 +10,7 @@ import pytest
 from finoptions import (
     BatchDividends,
     CashDividendBatch,
+    CashDividendExerciseMesh,
     ConstantVolatility,
     ContinuousDividendYieldBatch,
     CpuExecutor,
@@ -479,6 +480,93 @@ def test_cash_batch_inserts_exact_events_and_is_thread_invariant() -> None:
         serial.expiry_paths,
     ):
         assert not values.flags.writeable
+
+
+def test_cash_dividend_date_mesh_matches_the_same_explicit_opportunity_set_bitwise() -> None:
+    """The theorem mesh changes only geometry and preserves an identical declared estimator."""
+    dividends = CashDividendBatch(
+        schedules=RaggedCashDividends(
+            offsets=np.array([0, 1], dtype=np.int64),
+            times=np.array([0.5], dtype=np.float64),
+            amounts=np.array([2.0], dtype=np.float64),
+        ),
+        policy=DividendPolicy.LIQUIDATOR,
+        maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
+    )
+    common = {
+        "initial_spots": np.array([100.0], dtype=np.float64),
+        "strikes": np.array([95.0], dtype=np.float64),
+        "maturities": np.array([1.0], dtype=np.float64),
+        "rates": np.array([0.03], dtype=np.float64),
+        "volatilities": np.array([0.25], dtype=np.float64),
+        "dividends": dividends,
+        "executor": CpuExecutor(threads=1),
+        "method": method(training_domain=913, evaluation_domain=90_913),
+    }
+    specialized = price_lsm_call_batch(
+        **common,
+        mesh=CashDividendExerciseMesh(),
+    )
+    explicit = price_lsm_call_batch(
+        **common,
+        mesh=UniformExerciseMesh(
+            base_intervals=2,
+            origin_exercise=OriginExercise.EXCLUDED,
+        ),
+    )
+    assert_batch_equal(specialized, explicit)
+
+
+def test_cash_dividend_date_mesh_rejects_every_out_of_domain_request() -> None:
+    """The specialized theorem domain is checked without rerouting the requested estimator."""
+    common = {
+        "initial_spots": np.array([100.0], dtype=np.float64),
+        "strikes": np.array([100.0], dtype=np.float64),
+        "maturities": np.array([1.0], dtype=np.float64),
+        "volatilities": np.array([0.25], dtype=np.float64),
+        "mesh": CashDividendExerciseMesh(),
+        "executor": CpuExecutor(threads=1),
+        "method": method(training_domain=1_301, evaluation_domain=91_301),
+    }
+    with pytest.raises(InputError, match="requires cash-dividend inputs"):
+        price_lsm_call_batch(
+            **common,
+            rates=np.array([0.03], dtype=np.float64),
+            dividends=ContinuousDividendYieldBatch(
+                annualized_decimals=np.array([0.0], dtype=np.float64)
+            ),
+        )
+
+    pre_expiry = RaggedCashDividends(
+        offsets=np.array([0, 1], dtype=np.int64),
+        times=np.array([0.5], dtype=np.float64),
+        amounts=np.array([2.0], dtype=np.float64),
+    )
+    with pytest.raises(InputError, match=r"requires a nonnegative.*rate.*row 0"):
+        price_lsm_call_batch(
+            **common,
+            rates=np.array([-0.001], dtype=np.float64),
+            dividends=CashDividendBatch(
+                schedules=pre_expiry,
+                policy=DividendPolicy.LIQUIDATOR,
+                maturity_boundary=MaturityBoundary.STRICTLY_BEFORE,
+            ),
+        )
+
+    with pytest.raises(InputError, match=r"does not admit terminal cash.*row 0, event 0"):
+        price_lsm_call_batch(
+            **common,
+            rates=np.array([0.03], dtype=np.float64),
+            dividends=CashDividendBatch(
+                schedules=RaggedCashDividends(
+                    offsets=np.array([0, 1], dtype=np.int64),
+                    times=np.array([1.0], dtype=np.float64),
+                    amounts=np.array([2.0], dtype=np.float64),
+                ),
+                policy=DividendPolicy.LIQUIDATOR,
+                maturity_boundary=MaturityBoundary.AT_OR_BEFORE,
+            ),
+        )
 
 
 def test_escrowed_batch_is_thread_invariant_and_volatility_semantics_are_explicit() -> None:

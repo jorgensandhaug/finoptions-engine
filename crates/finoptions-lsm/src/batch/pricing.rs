@@ -19,7 +19,7 @@ use crate::{
 
 use super::input::escrowed_origin_prepaid_cash;
 use super::{
-    BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmError,
+    BatchDividendModel, BatchExerciseMesh, BatchLsmCallInputs, BatchLsmCallMethod, BatchLsmError,
     EscrowedVolatilityConvention, GroupedBatchLsmCallInputs, OriginExercise,
 };
 
@@ -184,6 +184,7 @@ impl<'a> BatchLsmCallInputs<'a> {
         executor: &CpuExecutor,
     ) -> Result<BatchLsmCallResult, BatchLsmError> {
         method.random_streams().validate(self.rows())?;
+        self.validate_exercise_mesh_domain(method.exercise_mesh())?;
         let math_backend = executor.math_backend();
         executor.dispatch(
             || self.price_serial(method, math_backend),
@@ -336,6 +337,31 @@ impl<'a> BatchLsmCallInputs<'a> {
         }
     }
 
+    fn validate_exercise_mesh_domain(
+        self,
+        exercise_mesh: BatchExerciseMesh,
+    ) -> Result<(), BatchLsmError> {
+        if !matches!(exercise_mesh, BatchExerciseMesh::CashDividendDates(_)) {
+            return Ok(());
+        }
+        let schedules = match self.dividend_model {
+            BatchDividendModel::ContinuousYield { .. } => {
+                return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+            }
+            BatchDividendModel::CashDividends { schedules, .. }
+            | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
+        };
+        for row in 0..self.rows() {
+            validate_cash_dividend_exercise_mesh_row(
+                row,
+                self.maturities[row],
+                self.constant_continuously_compounded_rates[row],
+                self.cash_row(schedules, row)?,
+            )?;
+        }
+        Ok(())
+    }
+
     fn cash_row(
         self,
         schedules: finoptions_batch::RaggedCashDividends<'a>,
@@ -368,6 +394,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         executor: &CpuExecutor,
     ) -> Result<BatchLsmCallResult, BatchLsmError> {
         method.random_streams().validate(self.groups())?;
+        self.validate_exercise_mesh_domain(method.exercise_mesh())?;
         let math_backend = executor.math_backend();
         executor.dispatch(
             || self.price_serial(method, math_backend),
@@ -553,6 +580,31 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         }
     }
 
+    fn validate_exercise_mesh_domain(
+        self,
+        exercise_mesh: BatchExerciseMesh,
+    ) -> Result<(), BatchLsmError> {
+        if !matches!(exercise_mesh, BatchExerciseMesh::CashDividendDates(_)) {
+            return Ok(());
+        }
+        let schedules = match self.dividend_model {
+            BatchDividendModel::ContinuousYield { .. } => {
+                return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+            }
+            BatchDividendModel::CashDividends { schedules, .. }
+            | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
+        };
+        for group in 0..self.groups() {
+            validate_cash_dividend_exercise_mesh_row(
+                self.group_range(group).start,
+                self.maturities[group],
+                self.constant_continuously_compounded_rates[group],
+                self.group_cash_row(schedules, group)?,
+            )?;
+        }
+        Ok(())
+    }
+
     fn group_cash_row(
         self,
         schedules: finoptions_batch::RaggedCashDividends<'a>,
@@ -602,17 +654,14 @@ fn build_path_plan(
     let cash_times = dividend
         .cash_schedule
         .map_or(&[][..], CashDividendRow::times);
-    let times = exact_union_times(row, maturity, method.mesh().base_intervals(), cash_times)?;
+    let (base_intervals, origin_exercise) =
+        resolve_exercise_mesh(row, maturity, rate, dividend, method.exercise_mesh())?;
+    let times = exact_union_times(row, maturity, base_intervals, cash_times)?;
     let grid = TimeGrid::try_new(times)
         .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
     let (curve, dividend_yield_curve) =
         build_row_curves(row, &grid, rate, dividend.continuous_yield)?;
-    let schedule = build_row_schedule(
-        row,
-        grid,
-        dividend.cash_schedule,
-        method.mesh().origin_exercise(),
-    )?;
+    let schedule = build_row_schedule(row, grid, dividend.cash_schedule, origin_exercise)?;
     let volatility_value = path_volatility(row, initial_spot, rate, supplied_volatility, dividend)?;
     let volatility = ConstantVolatility::try_new(volatility_value)
         .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
@@ -630,6 +679,49 @@ fn build_path_plan(
     }
     .map_err(|source| BatchLsmError::SimulationPlanAtRow { row, source })?;
     Ok((plan, curve))
+}
+
+fn resolve_exercise_mesh(
+    row: usize,
+    maturity: f64,
+    rate: f64,
+    dividend: RowDividendModel<'_>,
+    exercise_mesh: BatchExerciseMesh,
+) -> Result<(u32, OriginExercise), BatchLsmError> {
+    match exercise_mesh {
+        BatchExerciseMesh::Uniform(mesh) => Ok((mesh.base_intervals(), mesh.origin_exercise())),
+        BatchExerciseMesh::CashDividendDates(_) => {
+            let schedule = dividend
+                .cash_schedule
+                .ok_or(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends)?;
+            validate_cash_dividend_exercise_mesh_row(row, maturity, rate, schedule)?;
+            Ok((1, OriginExercise::Excluded))
+        }
+    }
+}
+
+fn validate_cash_dividend_exercise_mesh_row(
+    row: usize,
+    maturity: f64,
+    rate: f64,
+    schedule: CashDividendRow<'_>,
+) -> Result<(), BatchLsmError> {
+    if rate < 0.0 {
+        return Err(BatchLsmError::NegativeRateForCashDividendExerciseMesh { row, rate });
+    }
+    if let Some((event, _)) = schedule
+        .times()
+        .iter()
+        .enumerate()
+        .find(|(_, time)| time.to_bits() == maturity.to_bits())
+    {
+        return Err(BatchLsmError::TerminalCashForCashDividendExerciseMesh {
+            row,
+            event,
+            maturity,
+        });
+    }
+    Ok(())
 }
 
 fn path_volatility(
@@ -952,6 +1044,19 @@ mod tests {
         .unwrap()
     }
 
+    fn cash_dividend_date_method() -> BatchLsmCallMethod {
+        BatchLsmCallMethod::try_new_cash_dividend_dates(
+            super::super::CashDividendExerciseMesh::new(),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap()
+    }
+
     fn valid_continuous_inputs<'a>(
         spots: &'a [f64],
         strikes: &'a [f64],
@@ -1014,6 +1119,202 @@ mod tests {
         let maximum_maturity_mesh = exact_union_times(0, f64::MAX, 4, &[]).unwrap();
         assert_eq!(maximum_maturity_mesh.last(), Some(&f64::MAX));
         assert!(maximum_maturity_mesh.iter().all(|time| time.is_finite()));
+    }
+
+    #[test]
+    fn cash_dividend_date_mesh_matches_the_identical_explicit_opportunity_set_bitwise() {
+        let spots = [100.0];
+        let strikes = [90.0];
+        let maturities = [1.0];
+        let rates = [0.05];
+        let volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 1], &[0.5], &[2.0]).unwrap();
+        let inputs = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
+            },
+        )
+        .unwrap();
+        let uniform = BatchLsmCallMethod::try_new(
+            super::super::UniformExerciseMesh::try_new(2, OriginExercise::Excluded).unwrap(),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        let executor = CpuExecutor::try_new(1).unwrap();
+
+        let specialized = inputs
+            .price(cash_dividend_date_method(), &executor)
+            .unwrap();
+        let explicit = inputs.price(uniform, &executor).unwrap();
+
+        assert_eq!(specialized, explicit);
+        assert_eq!(specialized.as_slice()[0].regression_nodes(), 1);
+    }
+
+    #[test]
+    fn grouped_cash_dividend_date_mesh_matches_the_same_explicit_opportunities_bitwise() {
+        let offsets = [0, 2];
+        let spots = [100.0];
+        let strikes = [90.0, 110.0];
+        let maturities = [1.0];
+        let rates = [0.05];
+        let volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 1], &[0.5], &[2.0]).unwrap();
+        let inputs = GroupedBatchLsmCallInputs::try_new(
+            &offsets,
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::StrictlyBefore,
+            },
+        )
+        .unwrap();
+        let uniform = BatchLsmCallMethod::try_new(
+            super::super::UniformExerciseMesh::try_new(2, OriginExercise::Excluded).unwrap(),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        let executor = CpuExecutor::try_new(2).unwrap();
+
+        let specialized = inputs
+            .price(cash_dividend_date_method(), &executor)
+            .unwrap();
+        let explicit = inputs.price(uniform, &executor).unwrap();
+
+        assert_eq!(specialized, explicit);
+        assert!(
+            specialized
+                .as_slice()
+                .iter()
+                .all(|row| row.regression_nodes() == 1)
+        );
+    }
+
+    #[test]
+    fn cash_dividend_date_mesh_reduces_empty_cash_schedules_to_expiry_only() {
+        let spots = [100.0];
+        let strikes = [90.0];
+        let maturities = [1.0];
+        let rates = [0.0];
+        let volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 0], &[], &[]).unwrap();
+        let inputs = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::AtOrBefore,
+            },
+        )
+        .unwrap();
+        let result = inputs
+            .price(
+                cash_dividend_date_method(),
+                &CpuExecutor::try_new(1).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(result.as_slice()[0].regression_nodes(), 0);
+        assert_eq!(result.as_slice()[0].early_exercise_paths(), 0);
+        assert_eq!(result.as_slice()[0].expiry_paths(), 2_048);
+    }
+
+    #[test]
+    fn cash_dividend_date_mesh_rejects_every_unproved_financial_domain() {
+        let spots = [100.0];
+        let strikes = [90.0];
+        let maturities = [1.0];
+        let volatilities = [0.25];
+        let executor = CpuExecutor::try_new(1).unwrap();
+        let continuous = valid_continuous_inputs(
+            &spots,
+            &strikes,
+            &maturities,
+            &[0.05],
+            &volatilities,
+            &[0.0],
+        );
+        assert_eq!(
+            continuous
+                .price(cash_dividend_date_method(), &executor)
+                .unwrap_err(),
+            BatchLsmError::CashDividendExerciseMeshRequiresCashDividends
+        );
+
+        let event = RaggedCashDividends::try_new(&[0, 1], &[0.5], &[2.0]).unwrap();
+        let negative_rate = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &[-0.001],
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: event,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::AtOrBefore,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            negative_rate
+                .price(cash_dividend_date_method(), &executor)
+                .unwrap_err(),
+            BatchLsmError::NegativeRateForCashDividendExerciseMesh {
+                row: 0,
+                rate: -0.001,
+            }
+        );
+
+        let terminal = RaggedCashDividends::try_new(&[0, 1], &[1.0], &[2.0]).unwrap();
+        let terminal_cash = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &[0.05],
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: terminal,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::AtOrBefore,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            terminal_cash
+                .price(cash_dividend_date_method(), &executor)
+                .unwrap_err(),
+            BatchLsmError::TerminalCashForCashDividendExerciseMesh {
+                row: 0,
+                event: 0,
+                maturity: 1.0,
+            }
+        );
     }
 
     #[test]
@@ -1565,7 +1866,7 @@ mod tests {
         );
         let base = method(OriginExercise::Excluded);
         let overflow = BatchLsmCallMethod::try_new(
-            base.mesh(),
+            base.uniform_mesh().unwrap(),
             base.training_paths(),
             base.evaluation_paths(),
             base.regression(),
@@ -1584,7 +1885,7 @@ mod tests {
         ));
 
         let collision = BatchLsmCallMethod::try_new(
-            base.mesh(),
+            base.uniform_mesh().unwrap(),
             base.training_paths(),
             base.evaluation_paths(),
             base.regression(),
@@ -2021,7 +2322,7 @@ mod tests {
         );
         let base = method(OriginExercise::Excluded);
         let shifted = BatchLsmCallMethod::try_new(
-            base.mesh(),
+            base.uniform_mesh().unwrap(),
             base.training_paths(),
             base.evaluation_paths(),
             base.regression(),

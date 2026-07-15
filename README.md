@@ -198,6 +198,12 @@ batch_result = price_lsm_call_batch(
 ```
 
 Rows receive disjoint, addressable random domains. Exact cash schedules use `CashDividendBatch`.
+For fixed-strike calls with deterministic cash dividends, nonnegative rates, and no cash event at
+expiry, the explicit `CashDividendExerciseMesh()` admits only the financially complete cash-event
+left limits and expiry. Requests outside that theorem domain fail before simulation; the engine
+never substitutes a uniform mesh. Continuous-yield and other general-domain runs use the declared
+`UniformExerciseMesh`.
+
 The distinct prepaid-forward approximation uses `EscrowedCashDividendBatch` and requires either
 `EscrowedVolatilityConvention.PREPAID_FORWARD` or
 `EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN`; no dividend representation or volatility
