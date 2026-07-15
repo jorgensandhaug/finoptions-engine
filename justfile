@@ -13,7 +13,8 @@ fmt:
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
-    cargo test --workspace --all-features --lib --bins --tests --examples
+    cargo test --workspace --all-features --exclude finoptions-python --lib --bins --tests --examples
+    cargo test -p finoptions-python --no-default-features --lib
     cargo test --workspace --all-features --doc --exclude finoptions-python
     uv run --no-sync ruff format --check .
     uv run --no-sync ruff check .

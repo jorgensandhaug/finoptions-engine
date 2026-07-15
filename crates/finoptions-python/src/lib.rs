@@ -1,5 +1,11 @@
 //! Private Python extension. The stable public surface lives in `python/finoptions`.
 
+use finoptions_american::{
+    AmericanOptionError as CoreAmericanOptionError, AndersenLake as CoreAndersenLake,
+    AndersenLakeBatchResult as CoreAndersenLakeBatchResult,
+    AndersenLakeSpec as CoreAndersenLakeSpec,
+    GroupedContinuousYieldCalls as CoreGroupedContinuousYieldCalls,
+};
 use finoptions_batch::{
     BatchError as CoreBatchError, CashAmountScale as CoreCashAmountScale,
     DividendBinSpec as CoreDividendBinSpec, MaturityBoundary as CoreMaturityBoundary,
@@ -53,6 +59,7 @@ create_exception!(_native, ExecutionError, PyRuntimeError);
 create_exception!(_native, SimulationError, PyRuntimeError);
 create_exception!(_native, LsmError, PyRuntimeError);
 create_exception!(_native, QuadratureError, PyRuntimeError);
+create_exception!(_native, AmericanOptionError, PyRuntimeError);
 
 /// Dedicated native CPU worker pool owned by the public Python execution specification.
 #[pyclass(name = "CpuExecutor", frozen, module = "finoptions._native")]
@@ -64,6 +71,68 @@ struct NativeCpuExecutor {
 #[pyclass(name = "EventAlignedQuadrature", frozen, module = "finoptions._native")]
 struct NativeEventAlignedQuadrature {
     inner: CoreEventAlignedQuadrature,
+}
+
+/// Reusable grouped Andersen-Lake rules with explicit fixed controls.
+#[pyclass(name = "AndersenLake", frozen, module = "finoptions._native")]
+struct NativeAndersenLake {
+    inner: CoreAndersenLake,
+}
+
+#[pymethods]
+impl NativeAndersenLake {
+    #[new]
+    fn new(
+        boundary_quadrature_order: usize,
+        iterations: usize,
+        collocation_nodes: usize,
+        price_quadrature_order: usize,
+        maximum_relative_boundary_residual: f64,
+        maximum_relative_obstacle_projection: f64,
+    ) -> PyResult<Self> {
+        let spec = CoreAndersenLakeSpec::try_new(
+            boundary_quadrature_order,
+            iterations,
+            collocation_nodes,
+            price_quadrature_order,
+            maximum_relative_boundary_residual,
+            maximum_relative_obstacle_projection,
+        )
+        .map_err(CoreAmericanOptionError::into_py_american_option_error)?;
+        CoreAndersenLake::try_new(spec)
+            .map(|inner| Self { inner })
+            .map_err(CoreAmericanOptionError::into_py_american_option_error)
+    }
+
+    #[getter]
+    fn boundary_quadrature_order(&self) -> usize {
+        self.inner.spec().boundary_quadrature_order()
+    }
+
+    #[getter]
+    fn iterations(&self) -> usize {
+        self.inner.spec().iterations()
+    }
+
+    #[getter]
+    fn collocation_nodes(&self) -> usize {
+        self.inner.spec().collocation_nodes()
+    }
+
+    #[getter]
+    fn price_quadrature_order(&self) -> usize {
+        self.inner.spec().price_quadrature_order()
+    }
+
+    #[getter]
+    fn maximum_relative_boundary_residual(&self) -> f64 {
+        self.inner.spec().maximum_relative_boundary_residual()
+    }
+
+    #[getter]
+    fn maximum_relative_obstacle_projection(&self) -> f64 {
+        self.inner.spec().maximum_relative_obstacle_projection()
+    }
 }
 
 #[pymethods]
@@ -199,6 +268,36 @@ trait IntoPyLsmError {
 
 trait IntoPyQuadratureError {
     fn into_py_quadrature_error(self) -> PyErr;
+}
+
+trait IntoPyAmericanOptionError {
+    fn into_py_american_option_error(self) -> PyErr;
+}
+
+impl IntoPyAmericanOptionError for CoreAmericanOptionError {
+    fn into_py_american_option_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreAmericanOptionError::InvalidIterations { .. }
+            | CoreAmericanOptionError::InvalidCollocationNodes { .. }
+            | CoreAmericanOptionError::UnsupportedLegendreOrder { .. }
+            | CoreAmericanOptionError::InvalidBoundaryResidualTolerance { .. }
+            | CoreAmericanOptionError::InsufficientOffsets { .. }
+            | CoreAmericanOptionError::NegativeOffset { .. }
+            | CoreAmericanOptionError::DecreasingOffset { .. }
+            | CoreAmericanOptionError::OffsetIndexOverflow { .. }
+            | CoreAmericanOptionError::OffsetSpanMismatch { .. }
+            | CoreAmericanOptionError::GroupColumnLengthMismatch { .. }
+            | CoreAmericanOptionError::EmptyStrikeGroup { .. }
+            | CoreAmericanOptionError::InvalidSpot { .. }
+            | CoreAmericanOptionError::InvalidMaturity { .. }
+            | CoreAmericanOptionError::InvalidRate { .. }
+            | CoreAmericanOptionError::InvalidDividendYield { .. }
+            | CoreAmericanOptionError::InvalidVolatility { .. }
+            | CoreAmericanOptionError::InvalidStrike { .. } => InputError::new_err(message),
+            _ => AmericanOptionError::new_err(message),
+        }
+    }
 }
 
 impl IntoPyQuadratureError for CoreQuadratureError {
@@ -1321,6 +1420,95 @@ fn native_batch_lsm_result(
     ))
 }
 
+type NativeAndersenLakeBatchResult<'py> = (
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<bool>>,
+);
+
+fn native_andersen_lake_result(
+    py: Python<'_>,
+    result: CoreAndersenLakeBatchResult,
+) -> PyResult<NativeAndersenLakeBatchResult<'_>> {
+    let (prices, exercised_at_origin, diagnostics) = result.into_parts();
+    let groups = diagnostics.len();
+    let mut residuals = Vec::new();
+    let mut obstacle_projections = Vec::new();
+    let mut european_identities = Vec::new();
+    residuals.try_reserve_exact(groups).map_err(|_| {
+        AmericanOptionError::new_err(format!(
+            "could not allocate {groups} Andersen-Lake boundary residuals"
+        ))
+    })?;
+    obstacle_projections
+        .try_reserve_exact(groups)
+        .map_err(|_| {
+            AmericanOptionError::new_err(format!(
+                "could not allocate {groups} Andersen-Lake obstacle projections"
+            ))
+        })?;
+    european_identities.try_reserve_exact(groups).map_err(|_| {
+        AmericanOptionError::new_err(format!(
+            "could not allocate {groups} Andersen-Lake route identities"
+        ))
+    })?;
+    for diagnostic in diagnostics {
+        residuals.push(diagnostic.maximum_relative_boundary_residual());
+        obstacle_projections.push(diagnostic.maximum_relative_obstacle_projection());
+        european_identities.push(diagnostic.used_european_identity());
+    }
+    Ok((
+        prices.into_pyarray(py),
+        exercised_at_origin.into_pyarray(py),
+        residuals.into_pyarray(py),
+        obstacle_projections.into_pyarray(py),
+        european_identities.into_pyarray(py),
+    ))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn price_andersen_lake_call_grouped_f64<'py>(
+    py: Python<'py>,
+    group_offsets: PyReadonlyArray1<'py, i64>,
+    group_spots: PyReadonlyArray1<'py, f64>,
+    group_maturities: PyReadonlyArray1<'py, f64>,
+    group_constant_continuously_compounded_rates: PyReadonlyArray1<'py, f64>,
+    group_annualized_dividend_yields: PyReadonlyArray1<'py, f64>,
+    group_constant_volatilities: PyReadonlyArray1<'py, f64>,
+    strikes: PyReadonlyArray1<'py, f64>,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    method: PyRef<'py, NativeAndersenLake>,
+) -> PyResult<NativeAndersenLakeBatchResult<'py>> {
+    let group_offsets = group_offsets.as_slice()?;
+    let group_spots = group_spots.as_slice()?;
+    let group_maturities = group_maturities.as_slice()?;
+    let group_rates = group_constant_continuously_compounded_rates.as_slice()?;
+    let group_yields = group_annualized_dividend_yields.as_slice()?;
+    let group_volatilities = group_constant_volatilities.as_slice()?;
+    let strikes = strikes.as_slice()?;
+    let core_executor = &executor.inner;
+    let core_method = &method.inner;
+    let result = py.detach(move || {
+        let inputs = CoreGroupedContinuousYieldCalls::try_new(
+            group_offsets,
+            group_spots,
+            group_maturities,
+            group_rates,
+            group_yields,
+            group_volatilities,
+            strikes,
+        )
+        .map_err(CoreAmericanOptionError::into_py_american_option_error)?;
+        core_method
+            .price_call_groups(core_executor, inputs)
+            .map_err(CoreAmericanOptionError::into_py_american_option_error)
+    })?;
+    native_andersen_lake_result(py, result)
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[pyfunction]
 fn price_lsm_call_batch_continuous_yield_f64<'py>(
@@ -1868,12 +2056,17 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeCpuExecutor>()?;
     module.add_class::<NativeEventAlignedQuadrature>()?;
+    module.add_class::<NativeAndersenLake>()?;
     module.add("InputError", module.py().get_type::<InputError>())?;
     module.add("BatchError", module.py().get_type::<BatchError>())?;
     module.add("ExecutionError", module.py().get_type::<ExecutionError>())?;
     module.add("SimulationError", module.py().get_type::<SimulationError>())?;
     module.add("LsmError", module.py().get_type::<LsmError>())?;
     module.add("QuadratureError", module.py().get_type::<QuadratureError>())?;
+    module.add(
+        "AmericanOptionError",
+        module.py().get_type::<AmericanOptionError>(),
+    )?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(bin_dividends_f32, module)?)?;
     module.add_function(wrap_pyfunction!(pack_padded_dividends_f32, module)?)?;
@@ -1881,6 +2074,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_event_aligned_call_f64, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        price_andersen_lake_call_grouped_f64,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(
         price_lsm_call_batch_continuous_yield_f64,
         module

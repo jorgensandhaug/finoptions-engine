@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Final, NamedTuple
 
 from . import _native
+from .american import (
+    AmericanOptionError,
+    AndersenLake,
+    AndersenLakeBatchResult,
+    price_andersen_lake_call_grouped,
+)
 from .batch_lsm import (
     BatchDividends,
     CashDividendBatch,
@@ -89,6 +95,9 @@ def build_info() -> BuildInfo:
 
 __version__: Final = build_info().package_version
 __all__ = [
+    "AmericanOptionError",
+    "AndersenLake",
+    "AndersenLakeBatchResult",
     "BatchDividends",
     "BatchError",
     "BinnedCashDividends",
@@ -142,6 +151,7 @@ __all__ = [
     "bin_cash_dividends",
     "build_info",
     "pack_padded_cash_dividends",
+    "price_andersen_lake_call_grouped",
     "price_event_aligned_call",
     "price_lsm_call",
     "price_lsm_call_batch",

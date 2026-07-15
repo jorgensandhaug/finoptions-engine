@@ -192,6 +192,42 @@ workflows must predeclare convergence gates and retain every level. The producti
 is checked against a separate adaptive one-dividend formula and an independently interpolated cash
 tree in the non-production Rust testkit.
 
+Continuous proportional-yield American calls use a deterministic grouped boundary method instead
+of simulation. One market state can own many strikes:
+
+```python
+import numpy as np
+
+from finoptions import AndersenLake, CpuExecutor, price_andersen_lake_call_grouped
+
+yield_result = price_andersen_lake_call_grouped(
+    group_offsets=np.array([0, 2], dtype=np.int64),
+    group_spots=np.array([100.0], dtype=np.float64),
+    group_maturities=np.array([1.0], dtype=np.float64),
+    group_constant_continuously_compounded_rates=np.array([0.03], dtype=np.float64),
+    group_annualized_dividend_yields=np.array([0.04], dtype=np.float64),
+    group_constant_volatilities=np.array([0.20], dtype=np.float64),
+    strikes=np.array([90.0, 110.0], dtype=np.float64),
+    executor=CpuExecutor(threads=4),
+    method=AndersenLake(
+        boundary_quadrature_order=13,
+        iterations=16,
+        collocation_nodes=6,
+        price_quadrature_order=21,
+        maximum_relative_boundary_residual=1.0e-4,
+        maximum_relative_obstacle_projection=1.0e-6,
+    ),
+)
+```
+
+The shown controls are one validated research profile, not an engine default. The method applies
+exact call-put symmetry, uses the exact zero-yield/no-early-exercise theorem where applicable, and
+reports origin stopping decisions, boundary residuals, bounded Snell-obstacle projections, and
+theorem routes. It never changes configuration or falls back to LSM. Negative call yields and any
+convergence, interpolation, financial-bound, or declared projection violation fail. [ADR
+0019](docs/adr/0019-grouped-continuous-yield-american-calls.md) records the mathematical domain and
+target-free convergence evidence.
+
 For research tables, the same estimator prices strict contiguous columns with contract-level
 parallelism and no implicit dtype or layout conversion:
 

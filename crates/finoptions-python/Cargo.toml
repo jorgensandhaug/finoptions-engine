@@ -18,6 +18,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+finoptions-american.workspace = true
 finoptions-batch.workspace = true
 finoptions-core.workspace = true
 finoptions-lsm.workspace = true

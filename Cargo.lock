@@ -253,6 +253,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "finoptions-american"
+version = "0.1.0"
+dependencies = [
+ "finoptions-core",
+ "finoptions-runtime",
+ "finoptions-testkit",
+ "libm",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "finoptions-batch"
 version = "0.1.0"
 dependencies = [
@@ -288,6 +300,7 @@ dependencies = [
 name = "finoptions-python"
 version = "0.1.0"
 dependencies = [
+ "finoptions-american",
  "finoptions-batch",
  "finoptions-core",
  "finoptions-lsm",

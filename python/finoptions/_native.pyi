@@ -7,6 +7,7 @@ class ExecutionError(RuntimeError): ...
 class SimulationError(RuntimeError): ...
 class LsmError(RuntimeError): ...
 class QuadratureError(RuntimeError): ...
+class AmericanOptionError(RuntimeError): ...
 
 type NativeExerciseDiagnostic = tuple[
     int,
@@ -51,6 +52,29 @@ class EventAlignedQuadrature:
     def stock_points(self) -> int: ...
     @property
     def normal_order(self) -> int: ...
+
+class AndersenLake:
+    def __init__(
+        self,
+        boundary_quadrature_order: int,
+        iterations: int,
+        collocation_nodes: int,
+        price_quadrature_order: int,
+        maximum_relative_boundary_residual: float,
+        maximum_relative_obstacle_projection: float,
+    ) -> None: ...
+    @property
+    def boundary_quadrature_order(self) -> int: ...
+    @property
+    def iterations(self) -> int: ...
+    @property
+    def collocation_nodes(self) -> int: ...
+    @property
+    def price_quadrature_order(self) -> int: ...
+    @property
+    def maximum_relative_boundary_residual(self) -> float: ...
+    @property
+    def maximum_relative_obstacle_projection(self) -> float: ...
 
 def build_info() -> tuple[str, str]: ...
 def bin_dividends_f32(
@@ -190,6 +214,23 @@ def price_event_aligned_call_f64(
     executor: CpuExecutor,
     method: EventAlignedQuadrature,
 ) -> tuple[float, float]: ...
+def price_andersen_lake_call_grouped_f64(
+    group_offsets: npt.NDArray[np.int64],
+    group_spots: npt.NDArray[np.float64],
+    group_maturities: npt.NDArray[np.float64],
+    group_constant_continuously_compounded_rates: npt.NDArray[np.float64],
+    group_annualized_dividend_yields: npt.NDArray[np.float64],
+    group_constant_volatilities: npt.NDArray[np.float64],
+    strikes: npt.NDArray[np.float64],
+    executor: CpuExecutor,
+    method: AndersenLake,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.bool_],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.bool_],
+]: ...
 def price_lsm_call_batch_continuous_yield_f64(
     initial_spots: npt.NDArray[np.float64],
     strikes: npt.NDArray[np.float64],

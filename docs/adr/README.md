@@ -22,3 +22,4 @@ repository.
 - [ADR 0016: Explicit cash-dividend-date exercise mesh](0016-cash-dividend-date-exercise-mesh.md)
 - [ADR 0017: Event-aligned direct quadrature](0017-event-aligned-direct-quadrature.md)
 - [ADR 0018: Exact row-aligned exercise-time batches](0018-exact-row-aligned-exercise-times.md)
+- [ADR 0019: Grouped continuous-yield American calls](0019-grouped-continuous-yield-american-calls.md)
