@@ -34,6 +34,11 @@ fixed-size Jacobi implementations so the compiler can specialize the tiny matrix
 dimensions remain unreachable through the validated public configuration rather than selecting a
 different solver.
 
+Fitted-policy execution similarly dispatches once per exercise rule to the validated degree-zero-
+through-four recurrence. The path loop keeps the same standardization, multiply-add sequence, and
+finite-value checks without repeating runtime degree control for every prediction. This is an
+execution specialization of the fitted model, not a different polynomial estimator.
+
 All predictor and response values are validated before workspace reuse. Unsupported degree,
 insufficient observations, non-finite input/arithmetic, degenerate predictor scale, numerical rank
 loss, excessive condition, and Jacobi non-convergence are typed failures. There is no automatic

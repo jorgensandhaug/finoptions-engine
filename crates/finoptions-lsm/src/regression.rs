@@ -168,6 +168,7 @@ pub(crate) struct PolynomialModel {
 }
 
 impl PolynomialModel {
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn predict(&self, predictor: f64) -> Result<f64, RegressionError> {
         if !predictor.is_finite() {
             return Err(RegressionError::NonFinitePrediction { predictor });
@@ -191,6 +192,39 @@ impl PolynomialModel {
             return Err(RegressionError::NonFinitePrediction { predictor });
         }
         Ok(prediction)
+    }
+
+    pub(crate) fn predict_for<const DEGREE: usize>(
+        &self,
+        predictor: f64,
+    ) -> Result<f64, RegressionError> {
+        debug_assert_eq!(self.degree.get(), DEGREE);
+        if !predictor.is_finite() {
+            return Err(RegressionError::NonFinitePrediction { predictor });
+        }
+        let standardized = if DEGREE == 0 {
+            0.0
+        } else {
+            (predictor - self.predictor_mean) / self.predictor_scale
+        };
+        let mut prediction = self.coefficients[0];
+        let mut previous = 0.0;
+        let mut current = 1.0;
+        for basis_degree in 0..DEGREE {
+            let next = (standardized - self.alphas[basis_degree])
+                .mul_add(current, -self.betas[basis_degree] * previous);
+            prediction = self.coefficients[basis_degree + 1].mul_add(next, prediction);
+            previous = current;
+            current = next;
+        }
+        if !prediction.is_finite() {
+            return Err(RegressionError::NonFinitePrediction { predictor });
+        }
+        Ok(prediction)
+    }
+
+    pub(crate) const fn degree(&self) -> usize {
+        self.degree.get()
     }
 
     pub(crate) const fn diagnostics(&self) -> RegressionDiagnostics {
@@ -679,6 +713,54 @@ impl RegressionBenchmark {
     }
 }
 
+/// Fitted-model wrapper used only by the internal prediction Criterion evidence gate.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct RegressionPredictionBenchmark {
+    model: PolynomialModel,
+}
+
+#[cfg(feature = "bench-internals")]
+impl RegressionPredictionBenchmark {
+    /// Fits one model outside the timed prediction loop.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the production fail-fast regression contract.
+    pub fn fit(
+        predictors: &[f64],
+        responses: &[f64],
+        spec: PolynomialRegressionSpec,
+    ) -> Result<Self, RegressionError> {
+        let model = RegressionWorkspace::default().fit_with_math_backend(
+            predictors,
+            responses,
+            spec,
+            CpuMathBackend::RustStdF64,
+        )?;
+        Ok(Self { model })
+    }
+
+    /// Evaluates the fitted production recurrence once.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the production fail-fast prediction contract.
+    pub fn predict(&self, predictor: f64) -> Result<f64, RegressionError> {
+        self.model.predict(predictor)
+    }
+
+    /// Evaluates the fitted degree-four recurrence after caller-hoisted degree dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the production fail-fast prediction contract.
+    pub fn predict_degree_four(&self, predictor: f64) -> Result<f64, RegressionError> {
+        self.model.predict_for::<4>(predictor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nalgebra::{DMatrix, DVector};
@@ -738,6 +820,21 @@ mod tests {
             .unwrap();
         let predictions = design * coefficients;
         (predictions.iter().copied().collect(), largest / smallest)
+    }
+
+    fn specialized_prediction(
+        model: &PolynomialModel,
+        degree: usize,
+        predictor: f64,
+    ) -> Result<f64, RegressionError> {
+        match degree {
+            0 => model.predict_for::<0>(predictor),
+            1 => model.predict_for::<1>(predictor),
+            2 => model.predict_for::<2>(predictor),
+            3 => model.predict_for::<3>(predictor),
+            4 => model.predict_for::<4>(predictor),
+            _ => unreachable!(),
+        }
     }
 
     fn independent_condition_and_rank(
@@ -811,7 +908,10 @@ mod tests {
                 svd_oracle(&predictors, &responses, &model);
 
             for (&predictor, &oracle) in predictors.iter().zip(&oracle_predictions) {
-                assert_close(model.predict(predictor).unwrap(), oracle, 2.0e-11, 2.0e-12);
+                let runtime = model.predict(predictor).unwrap();
+                let specialized = specialized_prediction(&model, degree, predictor).unwrap();
+                assert_eq!(runtime.to_bits(), specialized.to_bits());
+                assert_close(runtime, oracle, 2.0e-11, 2.0e-12);
             }
             assert_close(
                 model.diagnostics().condition_number(),

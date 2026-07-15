@@ -1,7 +1,9 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use finoptions_lsm::{PolynomialDegree, PolynomialRegressionSpec, RegressionBenchmark};
+use finoptions_lsm::{
+    PolynomialDegree, PolynomialRegressionSpec, RegressionBenchmark, RegressionPredictionBenchmark,
+};
 use finoptions_sim::CpuMathBackend;
 use nalgebra::{DMatrix, DVector};
 
@@ -91,6 +93,36 @@ fn benchmark(c: &mut Criterion) {
                 });
             },
         );
+    }
+    group.finish();
+
+    let (predictors, responses) = population(500);
+    let prediction = RegressionPredictionBenchmark::fit(&predictors, &responses, spec).unwrap();
+    let mut group = c.benchmark_group("polynomial_prediction_degree_4");
+    group.throughput(Throughput::Elements(500));
+    for (name, predict) in [
+        (
+            "runtime_degree_recurrence_500",
+            RegressionPredictionBenchmark::predict
+                as fn(&RegressionPredictionBenchmark, f64) -> Result<f64, _>,
+        ),
+        (
+            "hoisted_degree_four_recurrence_500",
+            RegressionPredictionBenchmark::predict_degree_four
+                as fn(&RegressionPredictionBenchmark, f64) -> Result<f64, _>,
+        ),
+    ] {
+        group.bench_function(name, |bencher| {
+            bencher.iter(|| {
+                let model = black_box(&prediction);
+                let predictors = black_box(&predictors);
+                let mut sum = 0.0;
+                for &predictor in predictors {
+                    sum += predict(model, black_box(predictor)).unwrap();
+                }
+                black_box(sum);
+            });
+        });
     }
     group.finish();
 }

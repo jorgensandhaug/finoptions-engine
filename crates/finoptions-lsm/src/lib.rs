@@ -21,4 +21,4 @@ pub use batch::{
 };
 #[cfg(feature = "bench-internals")]
 #[doc(hidden)]
-pub use regression::RegressionBenchmark;
+pub use regression::{RegressionBenchmark, RegressionPredictionBenchmark};

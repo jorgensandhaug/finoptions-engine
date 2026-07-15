@@ -442,23 +442,7 @@ impl LsmCallEstimator {
                 source,
             })?;
         let diagnostics = model.diagnostics();
-        for (path, (&spot, value)) in spots.iter().zip(values).enumerate() {
-            if spot <= self.strike {
-                continue;
-            }
-            let intrinsic = spot - self.strike;
-            let continuation =
-                model
-                    .predict(spot / self.strike)
-                    .map_err(|source| LsmError::PredictionAtPath {
-                        node: node.get(),
-                        path,
-                        source,
-                    })?;
-            if self.tie_rule.should_exercise(intrinsic, continuation) {
-                *value = intrinsic;
-            }
-        }
+        self.apply_training_rule(node, spots, values, &model)?;
         let in_the_money_paths = u32::try_from(candidate_states.len()).map_err(|_| {
             LsmError::PathCountOutsideDomain {
                 population: "training in-the-money",
@@ -474,6 +458,50 @@ impl LsmCallEstimator {
                 diagnostics,
             },
         ))
+    }
+
+    fn apply_training_rule(
+        self,
+        node: NodeId,
+        spots: &[f64],
+        values: &mut [f64],
+        model: &PolynomialModel,
+    ) -> Result<(), LsmError> {
+        match model.degree() {
+            0 => self.apply_training_rule_for::<0>(node, spots, values, model),
+            1 => self.apply_training_rule_for::<1>(node, spots, values, model),
+            2 => self.apply_training_rule_for::<2>(node, spots, values, model),
+            3 => self.apply_training_rule_for::<3>(node, spots, values, model),
+            4 => self.apply_training_rule_for::<4>(node, spots, values, model),
+            _ => unreachable!("validated polynomial model has degree zero through four"),
+        }
+    }
+
+    fn apply_training_rule_for<const DEGREE: usize>(
+        self,
+        node: NodeId,
+        spots: &[f64],
+        values: &mut [f64],
+        model: &PolynomialModel,
+    ) -> Result<(), LsmError> {
+        for (path, (&spot, value)) in spots.iter().zip(values).enumerate() {
+            if spot <= self.strike {
+                continue;
+            }
+            let intrinsic = spot - self.strike;
+            let continuation =
+                model
+                    .predict_for::<DEGREE>(spot / self.strike)
+                    .map_err(|source| LsmError::PredictionAtPath {
+                        node: node.get(),
+                        path,
+                        source,
+                    })?;
+            if self.tie_rule.should_exercise(intrinsic, continuation) {
+                *value = intrinsic;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -619,6 +647,60 @@ impl FittedLsmCallPolicy {
         discounted_payoffs: &mut [f64],
         exercise_counts: &mut [u32],
     ) -> Result<(), LsmError> {
+        match model.degree() {
+            0 => self.apply_evaluation_rule_for::<0>(
+                evaluation,
+                exercise_row,
+                model,
+                active,
+                discounted_payoffs,
+                exercise_counts,
+            ),
+            1 => self.apply_evaluation_rule_for::<1>(
+                evaluation,
+                exercise_row,
+                model,
+                active,
+                discounted_payoffs,
+                exercise_counts,
+            ),
+            2 => self.apply_evaluation_rule_for::<2>(
+                evaluation,
+                exercise_row,
+                model,
+                active,
+                discounted_payoffs,
+                exercise_counts,
+            ),
+            3 => self.apply_evaluation_rule_for::<3>(
+                evaluation,
+                exercise_row,
+                model,
+                active,
+                discounted_payoffs,
+                exercise_counts,
+            ),
+            4 => self.apply_evaluation_rule_for::<4>(
+                evaluation,
+                exercise_row,
+                model,
+                active,
+                discounted_payoffs,
+                exercise_counts,
+            ),
+            _ => unreachable!("validated polynomial model has degree zero through four"),
+        }
+    }
+
+    fn apply_evaluation_rule_for<const DEGREE: usize>(
+        &self,
+        evaluation: &SimulatedPaths,
+        exercise_row: usize,
+        model: &PolynomialModel,
+        active: &mut [u8],
+        discounted_payoffs: &mut [f64],
+        exercise_counts: &mut [u32],
+    ) -> Result<(), LsmError> {
         let node = self.observation_nodes[exercise_row];
         let discount = self.discount_to_origin[exercise_row];
         let mut count = 0_u32;
@@ -630,7 +712,7 @@ impl FittedLsmCallPolicy {
             }
             let intrinsic = spot - self.estimator.strike;
             let continuation = model
-                .predict(spot / self.estimator.strike)
+                .predict_for::<DEGREE>(spot / self.estimator.strike)
                 .map_err(|source| LsmError::PredictionAtPath {
                     node: node.get(),
                     path,
