@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_cash_bermudan_schedule_agrees_with_the_independent_interpolated_tree() {
+    fn terminal_cash_schedule_agrees_with_tree_and_predecessor_theorem() {
         let intervals = 256_u32;
         let intervals_usize = usize::try_from(intervals).unwrap();
         let times = (0..=intervals)
@@ -762,6 +762,8 @@ mod tests {
                 DividendPolicy::Liquidator,
             )
             .unwrap();
+        let predecessor_only = schedule(&times, &[(intervals_usize, 4.0)], &[intervals_usize - 1]);
+        let restricted = price(&quadrature, 100.0, &predecessor_only, 0.03, 0.0, 0.25, 4);
         let independent = interpolated_crr_call(
             100.0,
             100.0,
@@ -776,6 +778,10 @@ mod tests {
         assert!(
             (observed.price() - independent).abs() <= 2.0e-3,
             "quadrature={observed:?}, tree={independent}",
+        );
+        assert!(
+            (observed.price() - restricted.price()).abs() <= 2.0e-3,
+            "full={observed:?}, predecessor_only={restricted:?}",
         );
     }
 

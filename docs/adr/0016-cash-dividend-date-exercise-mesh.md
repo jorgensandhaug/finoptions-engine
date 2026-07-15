@@ -56,6 +56,10 @@ unchanged. The resulting finite-path LSM estimate is not described as an exact a
 - Empty cash schedules produce zero regression nodes and expiry-only stopping.
 - Rust and Python tests reject proportional yield, negative rate, and terminal cash without
   fallback; validation covers the entire request before path execution.
+- On one exact 256-interval terminal-cash schedule, direct quadrature with all 256 pre-expiry
+  exercise nodes agrees within `0.002` with the same grid restricted to its explicitly declared
+  final predecessor node, and with an independent 16,384-step interpolated CRR tree. This validates
+  the theorem diagnostic; it does not relax the production mesh's terminal-cash rejection.
 - Retained project-shaped measurements are recorded in
   [`../performance/2026-07-15-cash-dividend-date-lsm.md`](../performance/2026-07-15-cash-dividend-date-lsm.md).
 
