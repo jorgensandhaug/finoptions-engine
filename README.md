@@ -236,6 +236,27 @@ left limits and expiry. Requests outside that theorem domain fail before simulat
 never substitutes a uniform mesh. Continuous-yield and other general-domain runs use the declared
 `UniformExerciseMesh`.
 
+Arbitrary finite Bermudan contracts use exact row-aligned times without retaining a redundant
+uniform grid:
+
+```python
+from finoptions import ExplicitExerciseMesh, RaggedExerciseTimes
+
+explicit_mesh = ExplicitExerciseMesh(
+    schedules=RaggedExerciseTimes(
+        offsets=np.array([0, 1, 2], dtype=np.int64),
+        times=np.array([255.0 / 256.0, 0.5], dtype=np.float64),
+    ),
+    origin_exercise=OriginExercise.EXCLUDED,
+)
+```
+
+The first row declares one predecessor before a terminal event; the second declares one half-year
+opportunity. Cash times are added as transition nodes but do not become exercisable unless listed.
+Times must be positive, strictly increasing within each row, and strictly before that row's expiry.
+The engine never derives a prior business day, subtracts an epsilon, sorts, broadcasts, or clips a
+schedule. Real calendar semantics belong to the data adapter.
+
 The distinct prepaid-forward approximation uses `EscrowedCashDividendBatch` and requires either
 `EscrowedVolatilityConvention.PREPAID_FORWARD` or
 `EscrowedVolatilityConvention.SPOT_MATCHED_AT_ORIGIN`; no dividend representation or volatility

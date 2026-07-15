@@ -1,6 +1,8 @@
 //! Borrowed, validated inputs and immutable method identity for call batches.
 
-use finoptions_batch::{CashDividendRow, MaturityBoundary, RaggedCashDividends};
+use finoptions_batch::{
+    CashDividendRow, MaturityBoundary, RaggedCashDividends, RaggedExerciseTimes,
+};
 use finoptions_core::DividendPolicy;
 
 use crate::{ExerciseTieRule, InsufficientExerciseSupportPolicy, PolynomialRegressionSpec};
@@ -83,25 +85,66 @@ impl CashDividendExerciseMesh {
     }
 }
 
+/// Exact row-aligned pre-expiry exercise opportunities with explicit origin semantics.
+///
+/// These times define the finite Bermudan contract directly. Cash-event times are inserted as
+/// transition nodes but are exercisable only when the caller also lists the exact time here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExplicitExerciseMesh<'a> {
+    schedules: RaggedExerciseTimes<'a>,
+    origin_exercise: OriginExercise,
+}
+
+impl<'a> ExplicitExerciseMesh<'a> {
+    /// Constructs an exact borrowed mesh without sorting, snapping, or inferring any time.
+    #[must_use]
+    pub const fn new(schedules: RaggedExerciseTimes<'a>, origin_exercise: OriginExercise) -> Self {
+        Self {
+            schedules,
+            origin_exercise,
+        }
+    }
+
+    /// Returns the row-aligned exact exercise schedules.
+    #[must_use]
+    pub const fn schedules(self) -> RaggedExerciseTimes<'a> {
+        self.schedules
+    }
+
+    /// Returns the exact valuation-origin exercise convention.
+    #[must_use]
+    pub const fn origin_exercise(self) -> OriginExercise {
+        self.origin_exercise
+    }
+}
+
 /// Closed exercise-opportunity identities admitted by call batches.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum BatchExerciseMesh {
+pub enum BatchExerciseMesh<'a> {
     /// Uniform Bermudan base dates plus exact cash-event dates.
     Uniform(UniformExerciseMesh),
     /// Only left limits of strictly pre-expiry deterministic cash events.
     CashDividendDates(CashDividendExerciseMesh),
+    /// Exact row-aligned pre-expiry opportunities supplied by the caller.
+    Explicit(ExplicitExerciseMesh<'a>),
 }
 
-impl From<UniformExerciseMesh> for BatchExerciseMesh {
+impl From<UniformExerciseMesh> for BatchExerciseMesh<'_> {
     fn from(value: UniformExerciseMesh) -> Self {
         Self::Uniform(value)
     }
 }
 
-impl From<CashDividendExerciseMesh> for BatchExerciseMesh {
+impl From<CashDividendExerciseMesh> for BatchExerciseMesh<'_> {
     fn from(value: CashDividendExerciseMesh) -> Self {
         Self::CashDividendDates(value)
+    }
+}
+
+impl<'a> From<ExplicitExerciseMesh<'a>> for BatchExerciseMesh<'a> {
+    fn from(value: ExplicitExerciseMesh<'a>) -> Self {
+        Self::Explicit(value)
     }
 }
 
@@ -213,8 +256,8 @@ fn domain_end(population: &'static str, start: u32, rows: usize) -> Result<u64, 
 
 /// Complete numerical and random identity for one independently evaluated LSM call batch.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BatchLsmCallMethod {
-    exercise_mesh: BatchExerciseMesh,
+pub struct BatchLsmCallMethod<'a> {
+    exercise_mesh: BatchExerciseMesh<'a>,
     training_paths: usize,
     evaluation_paths: usize,
     regression: PolynomialRegressionSpec,
@@ -223,7 +266,7 @@ pub struct BatchLsmCallMethod {
     random_streams: BatchRandomStreams,
 }
 
-impl BatchLsmCallMethod {
+impl<'a> BatchLsmCallMethod<'a> {
     /// Validates path domains while preserving every estimator-defining input.
     ///
     /// # Errors
@@ -276,8 +319,34 @@ impl BatchLsmCallMethod {
         )
     }
 
+    /// Validates a method over exact row-aligned pre-expiry exercise opportunities.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed path-count failure. Exercise row counts and strict pre-expiry bounds are
+    /// checked for the complete batch before path allocation during pricing.
+    pub fn try_new_explicit(
+        mesh: ExplicitExerciseMesh<'a>,
+        training_paths: usize,
+        evaluation_paths: usize,
+        regression: PolynomialRegressionSpec,
+        tie_rule: ExerciseTieRule,
+        insufficient_exercise_support: InsufficientExerciseSupportPolicy,
+        random_streams: BatchRandomStreams,
+    ) -> Result<Self, BatchLsmError> {
+        Self::try_new_with_exercise_mesh(
+            mesh.into(),
+            training_paths,
+            evaluation_paths,
+            regression,
+            tie_rule,
+            insufficient_exercise_support,
+            random_streams,
+        )
+    }
+
     fn try_new_with_exercise_mesh(
-        exercise_mesh: BatchExerciseMesh,
+        exercise_mesh: BatchExerciseMesh<'a>,
         training_paths: usize,
         evaluation_paths: usize,
         regression: PolynomialRegressionSpec,
@@ -305,7 +374,7 @@ impl BatchLsmCallMethod {
 
     /// Returns the exact exercise-opportunity identity.
     #[must_use]
-    pub const fn exercise_mesh(self) -> BatchExerciseMesh {
+    pub const fn exercise_mesh(self) -> BatchExerciseMesh<'a> {
         self.exercise_mesh
     }
 
@@ -314,7 +383,7 @@ impl BatchLsmCallMethod {
     pub const fn uniform_mesh(self) -> Option<UniformExerciseMesh> {
         match self.exercise_mesh {
             BatchExerciseMesh::Uniform(mesh) => Some(mesh),
-            BatchExerciseMesh::CashDividendDates(_) => None,
+            BatchExerciseMesh::CashDividendDates(_) | BatchExerciseMesh::Explicit(_) => None,
         }
     }
 

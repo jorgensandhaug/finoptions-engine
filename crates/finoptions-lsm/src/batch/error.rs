@@ -106,6 +106,21 @@ pub enum BatchLsmError {
         maturity: f64,
     },
 
+    /// An exact exercise opportunity is not strictly before expiry.
+    #[error(
+        "explicit exercise time at batch row {row}, event {event}, time {time:?} must be strictly before maturity {maturity:?}"
+    )]
+    ExplicitExerciseAtOrAfterMaturity {
+        /// Zero-based contract or first contract in a simulation group.
+        row: usize,
+        /// Zero-based explicit opportunity within the schedule.
+        event: usize,
+        /// Supplied year fraction.
+        time: f64,
+        /// Contract maturity year fraction.
+        maturity: f64,
+    },
+
     /// Independent evaluation cannot report sampling dispersion from one path.
     #[error("batched LSM evaluation requires at least two paths; observed {observed}")]
     InsufficientEvaluationPaths {
@@ -257,6 +272,19 @@ pub enum BatchLsmError {
         cash_events: usize,
     },
 
+    /// An explicit exercise/cash union exceeds the supported node domain.
+    #[error(
+        "LSM explicit batch mesh shape overflow at row {row} for {exercise_events} exercise events and {cash_events} cash events"
+    )]
+    ExplicitContractMeshShapeOverflow {
+        /// Zero-based contract row.
+        row: usize,
+        /// Exact exercise-opportunity count.
+        exercise_events: usize,
+        /// Exact cash-event count.
+        cash_events: usize,
+    },
+
     /// A row-specific exact union mesh could not reserve its declared memory.
     #[error("LSM batch could not allocate {nodes} mesh nodes at row {row}")]
     ContractMeshAllocationFailed {
@@ -288,6 +316,19 @@ pub enum BatchLsmError {
         /// Zero-based contract row.
         row: usize,
         /// Zero-based event within the row.
+        event: usize,
+        /// Exact event year fraction.
+        time: f64,
+    },
+
+    /// An explicit exercise time was unexpectedly absent from its exact union mesh.
+    #[error(
+        "exercise time at batch row {row}, event {event}, time {time:?} is absent from its exact union mesh"
+    )]
+    ExplicitExerciseNodeMissing {
+        /// Zero-based contract row.
+        row: usize,
+        /// Zero-based explicit exercise opportunity.
         event: usize,
         /// Exact event year fraction.
         time: f64,

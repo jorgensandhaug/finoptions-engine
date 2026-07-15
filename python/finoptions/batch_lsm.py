@@ -16,6 +16,7 @@ from .model import DividendPolicy, InputError
 from .simulation import CpuExecutor
 
 Float64Vector = npt.NDArray[np.float64]
+Int64Vector = npt.NDArray[np.int64]
 UInt32Vector = npt.NDArray[np.uint32]
 BoolVector = npt.NDArray[np.bool_]
 
@@ -85,6 +86,52 @@ class CashDividendExerciseMesh:
 
 
 @dataclass(frozen=True, slots=True)
+class RaggedExerciseTimes:
+    """Borrowable row-aligned Arrow-LargeList-style exact exercise times."""
+
+    offsets: Int64Vector
+    times: Float64Vector
+
+    def __post_init__(self) -> None:
+        """Reject malformed, invalid, duplicate, or unordered opportunities without copying."""
+        _validate_vector(self.offsets, field="exercise offsets", dtype="int64")
+        _validate_vector(self.times, field="exercise times", dtype="float64")
+        _native.validate_ragged_exercise_times_f64(self.offsets, self.times)
+
+    @property
+    def rows(self) -> int:
+        """Return the exact schedule-row count."""
+        return int(self.offsets.size - 1)
+
+    @property
+    def events(self) -> int:
+        """Return the total explicit opportunity count."""
+        return int(self.times.size)
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitExerciseMesh:
+    """Exact row-aligned pre-expiry Bermudan opportunities.
+
+    Cash-event times become transition nodes but are exercisable only when also listed here.
+    Expiry is always the final stopping opportunity. Calendar mapping belongs to the caller; this
+    type never sorts, snaps, deduplicates, or infers a time.
+    """
+
+    schedules: RaggedExerciseTimes
+    origin_exercise: OriginExercise
+
+    def __post_init__(self) -> None:
+        """Reject duck-typed schedules and implicit origin semantics."""
+        if type(self.schedules) is not RaggedExerciseTimes:
+            msg = "schedules must be RaggedExerciseTimes"
+            raise InputError(msg)
+        if type(self.origin_exercise) is not OriginExercise:
+            msg = "origin_exercise must be OriginExercise"
+            raise InputError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class ContinuousDividendYieldBatch:
     """One constant nonnegative annualized proportional yield per option row."""
 
@@ -148,14 +195,24 @@ class EscrowedCashDividendBatch:
 
 
 type BatchDividends = ContinuousDividendYieldBatch | CashDividendBatch | EscrowedCashDividendBatch
-type ExerciseMesh = UniformExerciseMesh | CashDividendExerciseMesh
+type ExerciseMesh = UniformExerciseMesh | CashDividendExerciseMesh | ExplicitExerciseMesh
 
 
-def _native_mesh_arguments(mesh: ExerciseMesh) -> tuple[str, int | None, str | None]:
+def _native_mesh_arguments(
+    mesh: ExerciseMesh,
+) -> tuple[str, int | None, str | None, Int64Vector | None, Float64Vector | None]:
     if type(mesh) is UniformExerciseMesh:
-        return ("uniform", mesh.base_intervals, mesh.origin_exercise.value)
+        return ("uniform", mesh.base_intervals, mesh.origin_exercise.value, None, None)
     if type(mesh) is CashDividendExerciseMesh:
-        return ("cash_dividend_dates", None, None)
+        return ("cash_dividend_dates", None, None, None, None)
+    if type(mesh) is ExplicitExerciseMesh:
+        return (
+            "explicit_times",
+            None,
+            mesh.origin_exercise.value,
+            mesh.schedules.offsets,
+            mesh.schedules.times,
+        )
     msg = "exercise mesh changed type after request validation"
     raise LsmError(msg)
 
@@ -163,6 +220,12 @@ def _native_mesh_arguments(mesh: ExerciseMesh) -> tuple[str, int | None, str | N
 def _validate_mesh_dividends(*, mesh: ExerciseMesh, dividends: BatchDividends) -> None:
     if type(mesh) is CashDividendExerciseMesh and type(dividends) is ContinuousDividendYieldBatch:
         msg = "CashDividendExerciseMesh requires cash-dividend inputs"
+        raise InputError(msg)
+
+
+def _validate_mesh_rows(*, mesh: ExerciseMesh, expected: int) -> None:
+    if type(mesh) is ExplicitExerciseMesh and mesh.schedules.rows != expected:
+        msg = f"explicit exercise schedules have {mesh.schedules.rows} rows; expected {expected}"
         raise InputError(msg)
 
 
@@ -298,9 +361,14 @@ def _validate_request(  # noqa: PLR0913 - each financial column is independently
             "or EscrowedCashDividendBatch"
         )
         raise InputError(msg)
-    if type(mesh) not in (UniformExerciseMesh, CashDividendExerciseMesh):
-        msg = "mesh must be UniformExerciseMesh or CashDividendExerciseMesh"
+    if type(mesh) not in (
+        UniformExerciseMesh,
+        CashDividendExerciseMesh,
+        ExplicitExerciseMesh,
+    ):
+        msg = "mesh must be UniformExerciseMesh, CashDividendExerciseMesh, or ExplicitExerciseMesh"
         raise InputError(msg)
+    _validate_mesh_rows(mesh=mesh, expected=int(initial_spots.size))
     _validate_mesh_dividends(mesh=mesh, dividends=dividends)
     if type(executor) is not CpuExecutor:
         msg = "executor must be CpuExecutor"
@@ -372,8 +440,9 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
 
     `rates` are constant continuously compounded annual decimals. `volatilities` are positive
     annual decimals. A uniform mesh is augmented by every exact cash-event time. The specialized
-    cash mesh admits only strictly pre-expiry cash-event left limits under nonnegative rates. Each
-    row uses `method.training_stream.domain + row` and
+    cash mesh admits only strictly pre-expiry cash-event left limits under nonnegative rates. An
+    explicit mesh uses only caller-listed pre-expiry opportunities and cash-event transition nodes.
+    Each row uses `method.training_stream.domain + row` and
     `method.evaluation_stream.domain + row`; the native boundary rejects overflow or overlap.
 
     Input arrays are borrowed without dtype, layout, or ownership conversion. Do not mutate them
@@ -471,9 +540,10 @@ def price_lsm_call_grouped_batch(
     out of sample on the shared, disjoint evaluation population. Sharing random paths across
     strikes is intentional common-random-number design; it does not share a stopping policy.
 
-    Group columns and result order are borrowed and preserved exactly. The function never infers
-    groups, casts arrays, sorts strikes, repairs offsets, changes regression degree, or falls back
-    after a financial, support, simulation, or numerical failure.
+    Group columns, exact exercise schedules, and result order are borrowed and preserved exactly.
+    The function never infers groups or calendar times, casts arrays, sorts strikes, repairs
+    offsets, changes regression degree, or falls back after a financial, support, simulation, or
+    numerical failure.
 
     Raises:
         InputError: If a runtime type, array layout, compact boundary, financial value, mesh, or
@@ -484,8 +554,12 @@ def price_lsm_call_grouped_batch(
     if type(groups) is not LsmStrikeGroups:
         msg = "groups must be LsmStrikeGroups"
         raise InputError(msg)
-    if type(mesh) not in (UniformExerciseMesh, CashDividendExerciseMesh):
-        msg = "mesh must be UniformExerciseMesh or CashDividendExerciseMesh"
+    if type(mesh) not in (
+        UniformExerciseMesh,
+        CashDividendExerciseMesh,
+        ExplicitExerciseMesh,
+    ):
+        msg = "mesh must be UniformExerciseMesh, CashDividendExerciseMesh, or ExplicitExerciseMesh"
         raise InputError(msg)
     if type(executor) is not CpuExecutor:
         msg = "executor must be CpuExecutor"
@@ -496,6 +570,7 @@ def price_lsm_call_grouped_batch(
     if method.evaluation_paths < _MIN_EVALUATION_PATHS:
         msg = "grouped batched LSM requires at least two independent evaluation paths"
         raise InputError(msg)
+    _validate_mesh_rows(mesh=mesh, expected=int(groups.initial_spots.size))
     _validate_mesh_dividends(mesh=mesh, dividends=groups.dividends)
 
     common = (
@@ -569,9 +644,11 @@ __all__ = [
     "EscrowedCashDividendBatch",
     "EscrowedVolatilityConvention",
     "ExerciseMesh",
+    "ExplicitExerciseMesh",
     "LsmBatchResult",
     "LsmStrikeGroups",
     "OriginExercise",
+    "RaggedExerciseTimes",
     "UniformExerciseMesh",
     "price_lsm_call_batch",
     "price_lsm_call_grouped_batch",

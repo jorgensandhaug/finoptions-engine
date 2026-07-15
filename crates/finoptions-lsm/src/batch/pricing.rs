@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use finoptions_batch::CashDividendRow;
+use finoptions_batch::{CashDividendRow, ExerciseTimeRow};
 use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
@@ -34,6 +34,15 @@ struct RowDividendModel<'a> {
 enum RowPathPlan {
     Spot(GbmPathPlan),
     Escrowed(EscrowedGbmPathPlan),
+}
+
+#[derive(Clone, Copy)]
+enum ExerciseNodeSelection<'a> {
+    AllTransitionNodes(OriginExercise),
+    ExactTimes {
+        times: &'a [f64],
+        origin_exercise: OriginExercise,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -297,6 +306,7 @@ impl<'a> BatchLsmCallInputs<'a> {
         let dividend = self.row_dividend_model(row)?;
         build_path_plan(
             row,
+            row,
             method,
             self.initial_spots[row],
             self.maturities[row],
@@ -339,27 +349,47 @@ impl<'a> BatchLsmCallInputs<'a> {
 
     fn validate_exercise_mesh_domain(
         self,
-        exercise_mesh: BatchExerciseMesh,
+        exercise_mesh: BatchExerciseMesh<'_>,
     ) -> Result<(), BatchLsmError> {
-        if !matches!(exercise_mesh, BatchExerciseMesh::CashDividendDates(_)) {
-            return Ok(());
-        }
-        let schedules = match self.dividend_model {
-            BatchDividendModel::ContinuousYield { .. } => {
-                return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+        match exercise_mesh {
+            BatchExerciseMesh::Uniform(_) => Ok(()),
+            BatchExerciseMesh::CashDividendDates(_) => {
+                let schedules = match self.dividend_model {
+                    BatchDividendModel::ContinuousYield { .. } => {
+                        return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+                    }
+                    BatchDividendModel::CashDividends { schedules, .. }
+                    | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
+                };
+                for row in 0..self.rows() {
+                    validate_cash_dividend_exercise_mesh_row(
+                        row,
+                        self.maturities[row],
+                        self.constant_continuously_compounded_rates[row],
+                        self.cash_row(schedules, row)?,
+                    )?;
+                }
+                Ok(())
             }
-            BatchDividendModel::CashDividends { schedules, .. }
-            | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
-        };
-        for row in 0..self.rows() {
-            validate_cash_dividend_exercise_mesh_row(
-                row,
-                self.maturities[row],
-                self.constant_continuously_compounded_rates[row],
-                self.cash_row(schedules, row)?,
-            )?;
+            BatchExerciseMesh::Explicit(mesh) => {
+                let schedules = mesh.schedules();
+                if schedules.rows() != self.rows() {
+                    return Err(BatchLsmError::RowCountMismatch {
+                        field: "explicit_exercise_times",
+                        expected: self.rows(),
+                        observed: schedules.rows(),
+                    });
+                }
+                for row in 0..self.rows() {
+                    validate_explicit_exercise_times(
+                        row,
+                        self.maturities[row],
+                        schedules.row(row).expect("validated row count"),
+                    )?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn cash_row(
@@ -484,6 +514,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         let dividend = self.group_dividend_model(group)?;
         let (plan, curve) = build_path_plan(
             first_row,
+            group,
             method,
             self.initial_spots[group],
             self.maturities[group],
@@ -582,27 +613,47 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
 
     fn validate_exercise_mesh_domain(
         self,
-        exercise_mesh: BatchExerciseMesh,
+        exercise_mesh: BatchExerciseMesh<'_>,
     ) -> Result<(), BatchLsmError> {
-        if !matches!(exercise_mesh, BatchExerciseMesh::CashDividendDates(_)) {
-            return Ok(());
-        }
-        let schedules = match self.dividend_model {
-            BatchDividendModel::ContinuousYield { .. } => {
-                return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+        match exercise_mesh {
+            BatchExerciseMesh::Uniform(_) => Ok(()),
+            BatchExerciseMesh::CashDividendDates(_) => {
+                let schedules = match self.dividend_model {
+                    BatchDividendModel::ContinuousYield { .. } => {
+                        return Err(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends);
+                    }
+                    BatchDividendModel::CashDividends { schedules, .. }
+                    | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
+                };
+                for group in 0..self.groups() {
+                    validate_cash_dividend_exercise_mesh_row(
+                        self.group_range(group).start,
+                        self.maturities[group],
+                        self.constant_continuously_compounded_rates[group],
+                        self.group_cash_row(schedules, group)?,
+                    )?;
+                }
+                Ok(())
             }
-            BatchDividendModel::CashDividends { schedules, .. }
-            | BatchDividendModel::EscrowedCashDividends { schedules, .. } => schedules,
-        };
-        for group in 0..self.groups() {
-            validate_cash_dividend_exercise_mesh_row(
-                self.group_range(group).start,
-                self.maturities[group],
-                self.constant_continuously_compounded_rates[group],
-                self.group_cash_row(schedules, group)?,
-            )?;
+            BatchExerciseMesh::Explicit(mesh) => {
+                let schedules = mesh.schedules();
+                if schedules.rows() != self.groups() {
+                    return Err(BatchLsmError::RowCountMismatch {
+                        field: "explicit_exercise_times",
+                        expected: self.groups(),
+                        observed: schedules.rows(),
+                    });
+                }
+                for group in 0..self.groups() {
+                    validate_explicit_exercise_times(
+                        self.group_range(group).start,
+                        self.maturities[group],
+                        schedules.row(group).expect("validated row count"),
+                    )?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn group_cash_row(
@@ -644,7 +695,8 @@ fn simulate_group_population(
 #[allow(clippy::too_many_arguments)]
 fn build_path_plan(
     row: usize,
-    method: BatchLsmCallMethod,
+    exercise_schedule_row: usize,
+    method: BatchLsmCallMethod<'_>,
     initial_spot: f64,
     maturity: f64,
     rate: f64,
@@ -654,14 +706,20 @@ fn build_path_plan(
     let cash_times = dividend
         .cash_schedule
         .map_or(&[][..], CashDividendRow::times);
-    let (base_intervals, origin_exercise) =
-        resolve_exercise_mesh(row, maturity, rate, dividend, method.exercise_mesh())?;
-    let times = exact_union_times(row, maturity, base_intervals, cash_times)?;
+    let (times, exercise_nodes) = resolve_exercise_mesh(
+        row,
+        exercise_schedule_row,
+        maturity,
+        rate,
+        dividend,
+        method.exercise_mesh(),
+        cash_times,
+    )?;
     let grid = TimeGrid::try_new(times)
         .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
     let (curve, dividend_yield_curve) =
         build_row_curves(row, &grid, rate, dividend.continuous_yield)?;
-    let schedule = build_row_schedule(row, grid, dividend.cash_schedule, origin_exercise)?;
+    let schedule = build_row_schedule(row, grid, dividend.cash_schedule, exercise_nodes)?;
     let volatility_value = path_volatility(row, initial_spot, rate, supplied_volatility, dividend)?;
     let volatility = ConstantVolatility::try_new(volatility_value)
         .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
@@ -681,23 +739,70 @@ fn build_path_plan(
     Ok((plan, curve))
 }
 
-fn resolve_exercise_mesh(
+#[allow(clippy::too_many_arguments)]
+fn resolve_exercise_mesh<'a>(
     row: usize,
+    exercise_schedule_row: usize,
     maturity: f64,
     rate: f64,
     dividend: RowDividendModel<'_>,
-    exercise_mesh: BatchExerciseMesh,
-) -> Result<(u32, OriginExercise), BatchLsmError> {
+    exercise_mesh: BatchExerciseMesh<'a>,
+    cash_times: &[f64],
+) -> Result<(Vec<f64>, ExerciseNodeSelection<'a>), BatchLsmError> {
     match exercise_mesh {
-        BatchExerciseMesh::Uniform(mesh) => Ok((mesh.base_intervals(), mesh.origin_exercise())),
+        BatchExerciseMesh::Uniform(mesh) => Ok((
+            exact_union_times(row, maturity, mesh.base_intervals(), cash_times)?,
+            ExerciseNodeSelection::AllTransitionNodes(mesh.origin_exercise()),
+        )),
         BatchExerciseMesh::CashDividendDates(_) => {
             let schedule = dividend
                 .cash_schedule
                 .ok_or(BatchLsmError::CashDividendExerciseMeshRequiresCashDividends)?;
             validate_cash_dividend_exercise_mesh_row(row, maturity, rate, schedule)?;
-            Ok((1, OriginExercise::Excluded))
+            Ok((
+                exact_union_times(row, maturity, 1, cash_times)?,
+                ExerciseNodeSelection::AllTransitionNodes(OriginExercise::Excluded),
+            ))
+        }
+        BatchExerciseMesh::Explicit(mesh) => {
+            let schedule = mesh.schedules().row(exercise_schedule_row).ok_or(
+                BatchLsmError::RowCountMismatch {
+                    field: "explicit_exercise_times",
+                    expected: exercise_schedule_row.saturating_add(1),
+                    observed: mesh.schedules().rows(),
+                },
+            )?;
+            validate_explicit_exercise_times(row, maturity, schedule)?;
+            Ok((
+                exact_explicit_union_times(row, maturity, schedule.times(), cash_times)?,
+                ExerciseNodeSelection::ExactTimes {
+                    times: schedule.times(),
+                    origin_exercise: mesh.origin_exercise(),
+                },
+            ))
         }
     }
+}
+
+fn validate_explicit_exercise_times(
+    row: usize,
+    maturity: f64,
+    schedule: ExerciseTimeRow<'_>,
+) -> Result<(), BatchLsmError> {
+    if let Some((event, &time)) = schedule
+        .times()
+        .iter()
+        .enumerate()
+        .find(|(_, time)| **time >= maturity)
+    {
+        return Err(BatchLsmError::ExplicitExerciseAtOrAfterMaturity {
+            row,
+            event,
+            time,
+            maturity,
+        });
+    }
+    Ok(())
 }
 
 fn validate_cash_dividend_exercise_mesh_row(
@@ -781,7 +886,7 @@ fn build_row_schedule(
     row: usize,
     grid: TimeGrid,
     cash_schedule: Option<CashDividendRow<'_>>,
-    origin_exercise: OriginExercise,
+    exercise_selection: ExerciseNodeSelection<'_>,
 ) -> Result<EventSchedule, BatchLsmError> {
     let mut dividends = Vec::new();
     if let Some(cash) = cash_schedule {
@@ -805,11 +910,45 @@ fn build_row_schedule(
             );
         }
     }
-    let exercise_start = usize::from(origin_exercise == OriginExercise::Excluded);
-    let exercise_nodes = (exercise_start..grid.len() - 1)
-        .map(|node| grid.node_id(node))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
+    let exercise_nodes = match exercise_selection {
+        ExerciseNodeSelection::AllTransitionNodes(origin_exercise) => {
+            let exercise_start = usize::from(origin_exercise == OriginExercise::Excluded);
+            (exercise_start..grid.len() - 1)
+                .map(|node| grid.node_id(node))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?
+        }
+        ExerciseNodeSelection::ExactTimes {
+            times,
+            origin_exercise,
+        } => {
+            let capacity = times.len() + usize::from(origin_exercise == OriginExercise::Included);
+            let mut nodes = Vec::new();
+            nodes.try_reserve_exact(capacity).map_err(|_| {
+                BatchLsmError::ContractMeshAllocationFailed {
+                    row,
+                    nodes: capacity,
+                }
+            })?;
+            if origin_exercise == OriginExercise::Included {
+                nodes.push(
+                    grid.node_id(0)
+                        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?,
+                );
+            }
+            for (event, &time) in times.iter().enumerate() {
+                let index = grid
+                    .as_slice()
+                    .binary_search_by(|candidate| candidate.total_cmp(&time))
+                    .map_err(|_| BatchLsmError::ExplicitExerciseNodeMissing { row, event, time })?;
+                nodes.push(
+                    grid.node_id(index)
+                        .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?,
+                );
+            }
+            nodes
+        }
+    };
     let expiry = grid
         .node_id(grid.len() - 1)
         .map_err(|source| BatchLsmError::FinancialInputAtRow { row, source })?;
@@ -896,6 +1035,73 @@ fn exact_union_times(
             (None, None) => break,
         }
     }
+    Ok(times)
+}
+
+fn exact_explicit_union_times(
+    row: usize,
+    maturity: f64,
+    exercise_times: &[f64],
+    cash_times: &[f64],
+) -> Result<Vec<f64>, BatchLsmError> {
+    let capacity = exercise_times
+        .len()
+        .checked_add(cash_times.len())
+        .and_then(|events| events.checked_add(2))
+        .ok_or(BatchLsmError::ExplicitContractMeshShapeOverflow {
+            row,
+            exercise_events: exercise_times.len(),
+            cash_events: cash_times.len(),
+        })?;
+    if capacity.saturating_sub(1) > u32::MAX as usize {
+        return Err(BatchLsmError::ExplicitContractMeshShapeOverflow {
+            row,
+            exercise_events: exercise_times.len(),
+            cash_events: cash_times.len(),
+        });
+    }
+    let mut times = Vec::new();
+    times
+        .try_reserve_exact(capacity)
+        .map_err(|_| BatchLsmError::ContractMeshAllocationFailed {
+            row,
+            nodes: capacity,
+        })?;
+    times.push(0.0);
+    let mut exercise = 0_usize;
+    let mut cash = 0_usize;
+    while exercise < exercise_times.len() || cash < cash_times.len() {
+        let next = match (exercise_times.get(exercise), cash_times.get(cash)) {
+            (Some(&exercise_time), Some(&cash_time)) => match exercise_time.total_cmp(&cash_time) {
+                std::cmp::Ordering::Less => {
+                    exercise += 1;
+                    exercise_time
+                }
+                std::cmp::Ordering::Equal => {
+                    exercise += 1;
+                    cash += 1;
+                    exercise_time
+                }
+                std::cmp::Ordering::Greater => {
+                    cash += 1;
+                    cash_time
+                }
+            },
+            (Some(&exercise_time), None) => {
+                exercise += 1;
+                exercise_time
+            }
+            (None, Some(&cash_time)) => {
+                cash += 1;
+                cash_time
+            }
+            (None, None) => break,
+        };
+        if next < maturity {
+            times.push(next);
+        }
+    }
+    times.push(maturity);
     Ok(times)
 }
 
@@ -1018,7 +1224,7 @@ impl BatchLsmCallRowResult {
 
 #[cfg(test)]
 mod tests {
-    use finoptions_batch::{MaturityBoundary, RaggedCashDividends};
+    use finoptions_batch::{MaturityBoundary, RaggedCashDividends, RaggedExerciseTimes};
 
     use super::*;
     use crate::{
@@ -1031,7 +1237,7 @@ mod tests {
             .unwrap()
     }
 
-    fn method(origin: OriginExercise) -> BatchLsmCallMethod {
+    fn method(origin: OriginExercise) -> BatchLsmCallMethod<'static> {
         BatchLsmCallMethod::try_new(
             super::super::UniformExerciseMesh::try_new(8, origin).unwrap(),
             2_048,
@@ -1044,7 +1250,7 @@ mod tests {
         .unwrap()
     }
 
-    fn cash_dividend_date_method() -> BatchLsmCallMethod {
+    fn cash_dividend_date_method() -> BatchLsmCallMethod<'static> {
         BatchLsmCallMethod::try_new_cash_dividend_dates(
             super::super::CashDividendExerciseMesh::new(),
             2_048,
@@ -1119,6 +1325,143 @@ mod tests {
         let maximum_maturity_mesh = exact_union_times(0, f64::MAX, 4, &[]).unwrap();
         assert_eq!(maximum_maturity_mesh.last(), Some(&f64::MAX));
         assert!(maximum_maturity_mesh.iter().all(|time| time.is_finite()));
+    }
+
+    #[test]
+    fn explicit_mesh_matches_an_identical_uniform_terminal_cash_contract_bitwise() {
+        let spots = [100.0];
+        let strikes = [100.0];
+        let maturities = [1.0];
+        let rates = [0.03];
+        let volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 1], &[1.0], &[4.0]).unwrap();
+        let inputs = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::AtOrBefore,
+            },
+        )
+        .unwrap();
+        let uniform = BatchLsmCallMethod::try_new(
+            super::super::UniformExerciseMesh::try_new(4, OriginExercise::Excluded).unwrap(),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        let exercise_times = RaggedExerciseTimes::try_new(&[0, 3], &[0.25, 0.5, 0.75]).unwrap();
+        let explicit = BatchLsmCallMethod::try_new_explicit(
+            super::super::ExplicitExerciseMesh::new(exercise_times, OriginExercise::Excluded),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        let executor = CpuExecutor::try_new(1).unwrap();
+
+        let uniform_result = inputs.price(uniform, &executor).unwrap();
+        let explicit_result = inputs.price(explicit, &executor).unwrap();
+
+        assert_eq!(explicit_result, uniform_result);
+        assert_eq!(explicit_result.as_slice()[0].regression_nodes(), 3);
+    }
+
+    #[test]
+    fn explicit_terminal_predecessor_is_sparse_and_fails_on_invalid_batch_domain() {
+        let spots = [100.0];
+        let strikes = [100.0];
+        let maturities = [1.0];
+        let rates = [0.03];
+        let volatilities = [0.25];
+        let dividends = RaggedCashDividends::try_new(&[0, 1], &[1.0], &[4.0]).unwrap();
+        let inputs = BatchLsmCallInputs::try_new(
+            &spots,
+            &strikes,
+            &maturities,
+            &rates,
+            &volatilities,
+            BatchDividendModel::CashDividends {
+                schedules: dividends,
+                policy: DividendPolicy::Liquidator,
+                maturity_boundary: MaturityBoundary::AtOrBefore,
+            },
+        )
+        .unwrap();
+        let predecessor = [255.0 / 256.0];
+        let schedules = RaggedExerciseTimes::try_new(&[0, 1], &predecessor).unwrap();
+        let explicit = BatchLsmCallMethod::try_new_explicit(
+            super::super::ExplicitExerciseMesh::new(schedules, OriginExercise::Excluded),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+
+        let result = inputs
+            .price(explicit, &CpuExecutor::try_new(1).unwrap())
+            .unwrap();
+        assert_eq!(result.as_slice()[0].regression_nodes(), 1);
+
+        let terminal = [1.0];
+        let terminal_schedule = RaggedExerciseTimes::try_new(&[0, 1], &terminal).unwrap();
+        let invalid = BatchLsmCallMethod::try_new_explicit(
+            super::super::ExplicitExerciseMesh::new(terminal_schedule, OriginExercise::Excluded),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        assert_eq!(
+            inputs
+                .price(invalid, &CpuExecutor::try_new(1).unwrap())
+                .unwrap_err(),
+            BatchLsmError::ExplicitExerciseAtOrAfterMaturity {
+                row: 0,
+                event: 0,
+                time: 1.0,
+                maturity: 1.0,
+            }
+        );
+
+        let empty = RaggedExerciseTimes::try_new(&[0, 0, 0], &[]).unwrap();
+        let wrong_rows = BatchLsmCallMethod::try_new_explicit(
+            super::super::ExplicitExerciseMesh::new(empty, OriginExercise::Excluded),
+            2_048,
+            2_048,
+            regression(),
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+            super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
+        )
+        .unwrap();
+        assert_eq!(
+            inputs
+                .price(wrong_rows, &CpuExecutor::try_new(1).unwrap())
+                .unwrap_err(),
+            BatchLsmError::RowCountMismatch {
+                field: "explicit_exercise_times",
+                expected: 1,
+                observed: 2,
+            }
+        );
     }
 
     #[test]

@@ -5,10 +5,12 @@
 //! precision validation.
 
 mod error;
+mod exercise;
 mod tensor;
 mod view;
 
 pub use error::BatchError;
+pub use exercise::{ExerciseTimeRow, RaggedExerciseTimes};
 pub use tensor::{
     BinnedDividendBatch, CashAmountScale, DividendBinSpec, MaturityBoundary, PaddedDividendBatch,
     PaddedSequenceSpec, TimeBinClosure, bin_dividends_f32, pack_padded_dividends_f32,

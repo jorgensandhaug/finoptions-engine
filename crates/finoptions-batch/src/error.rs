@@ -83,6 +83,19 @@ pub enum BatchError {
         observed: f64,
     },
 
+    /// An explicit exercise time is non-finite, non-positive, or negative zero.
+    #[error(
+        "exercise time at row {row}, event {event} must be finite and strictly positive; observed {observed:?}"
+    )]
+    InvalidExerciseTime {
+        /// Zero-based batch row.
+        row: usize,
+        /// Zero-based exercise opportunity within the row.
+        event: usize,
+        /// Invalid year fraction.
+        observed: f64,
+    },
+
     /// Event times decrease within one row.
     #[error(
         "cash-dividend times must be nondecreasing; row {row}, event {event} is {observed:?} after {previous:?}"
@@ -91,6 +104,21 @@ pub enum BatchError {
         /// Zero-based batch row.
         row: usize,
         /// Zero-based event within the row.
+        event: usize,
+        /// Previous year fraction.
+        previous: f64,
+        /// Invalid current year fraction.
+        observed: f64,
+    },
+
+    /// Explicit exercise times are not strictly increasing within one row.
+    #[error(
+        "exercise times must be strictly increasing; row {row}, event {event} is {observed:?} after {previous:?}"
+    )]
+    NonIncreasingExerciseTime {
+        /// Zero-based batch row.
+        row: usize,
+        /// Zero-based exercise opportunity within the row.
         event: usize,
         /// Previous year fraction.
         previous: f64,

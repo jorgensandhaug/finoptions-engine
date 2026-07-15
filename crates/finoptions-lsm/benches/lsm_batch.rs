@@ -2,14 +2,14 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use finoptions_batch::{MaturityBoundary, RaggedCashDividends};
+use finoptions_batch::{MaturityBoundary, RaggedCashDividends, RaggedExerciseTimes};
 use finoptions_core::{
     CashDividend, ConstantVolatility, CumulativeDividendYieldCurve, DividendPolicy, EventSchedule,
     LogDiscountCurve, TimeGrid,
 };
 use finoptions_lsm::{
     BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams,
-    CashDividendExerciseMesh, ExerciseTieRule, GroupedBatchLsmCallInputs,
+    CashDividendExerciseMesh, ExerciseTieRule, ExplicitExerciseMesh, GroupedBatchLsmCallInputs,
     InsufficientExerciseSupportPolicy, LsmCallEstimator, OriginExercise, PolynomialDegree,
     PolynomialRegressionSpec, UniformExerciseMesh,
 };
@@ -278,7 +278,7 @@ fn regression() -> PolynomialRegressionSpec {
         .unwrap()
 }
 
-fn batch_method() -> BatchLsmCallMethod {
+fn batch_method() -> BatchLsmCallMethod<'static> {
     BatchLsmCallMethod::try_new(
         UniformExerciseMesh::try_new(STEPS, OriginExercise::Excluded).unwrap(),
         TRAINING_PATHS,
@@ -296,9 +296,27 @@ fn batch_method() -> BatchLsmCallMethod {
     .unwrap()
 }
 
-fn cash_dividend_date_method() -> BatchLsmCallMethod {
+fn cash_dividend_date_method() -> BatchLsmCallMethod<'static> {
     BatchLsmCallMethod::try_new_cash_dividend_dates(
         CashDividendExerciseMesh::new(),
+        TRAINING_PATHS,
+        EVALUATION_PATHS,
+        regression(),
+        ExerciseTieRule::StrictlyGreater,
+        InsufficientExerciseSupportPolicy::Fail,
+        BatchRandomStreams::new(
+            TRAINING_SEED,
+            EVALUATION_SEED,
+            TRAINING_DOMAIN_START,
+            EVALUATION_DOMAIN_START,
+        ),
+    )
+    .unwrap()
+}
+
+fn explicit_exercise_method(schedules: RaggedExerciseTimes<'_>) -> BatchLsmCallMethod<'_> {
+    BatchLsmCallMethod::try_new_explicit(
+        ExplicitExerciseMesh::new(schedules, OriginExercise::Excluded),
         TRAINING_PATHS,
         EVALUATION_PATHS,
         regression(),
@@ -361,6 +379,12 @@ fn benchmark_cash_dividend_dates(criterion: &mut Criterion) {
     let backends = [("rust_std_f64", CpuMathBackend::RustStdF64)];
     for groups in [32, 128] {
         let workload = StrikeGroupWorkload::new(groups, 7);
+        let explicit_schedules = RaggedExerciseTimes::try_new(
+            &workload.group_dividend_offsets,
+            &workload.group_dividend_times,
+        )
+        .unwrap();
+        let explicit_method = explicit_exercise_method(explicit_schedules);
         group.throughput(Throughput::Elements(
             u64::try_from(workload.rows()).unwrap(),
         ));
@@ -376,6 +400,20 @@ fn benchmark_cash_dividend_dates(criterion: &mut Criterion) {
                                 workload
                                     .grouped_inputs()
                                     .price(cash_dividend_date_method(), black_box(&executor))
+                                    .unwrap(),
+                            );
+                        });
+                    },
+                );
+                group.bench_with_input(
+                    BenchmarkId::new(format!("explicit_{backend_name}_{threads}t"), groups),
+                    &groups,
+                    |bencher, _| {
+                        bencher.iter(|| {
+                            black_box(
+                                workload
+                                    .grouped_inputs()
+                                    .price(explicit_method, black_box(&executor))
                                     .unwrap(),
                             );
                         });

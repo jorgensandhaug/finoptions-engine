@@ -8,6 +8,6 @@ pub use error::BatchLsmError;
 pub use input::{
     BatchDividendModel, BatchExerciseMesh, BatchLsmCallInputs, BatchLsmCallMethod,
     BatchRandomStreams, CashDividendExerciseMesh, EscrowedVolatilityConvention,
-    GroupedBatchLsmCallInputs, OriginExercise, UniformExerciseMesh,
+    ExplicitExerciseMesh, GroupedBatchLsmCallInputs, OriginExercise, UniformExerciseMesh,
 };
 pub use pricing::{BatchLsmCallResult, BatchLsmCallRowResult};

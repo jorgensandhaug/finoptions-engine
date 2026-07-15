@@ -20,6 +20,7 @@ from finoptions import (
     EscrowedVolatilityConvention,
     EventSchedule,
     ExerciseTieRule,
+    ExplicitExerciseMesh,
     InputError,
     InsufficientExerciseSupportPolicy,
     LogDiscountCurve,
@@ -29,6 +30,7 @@ from finoptions import (
     MaturityBoundary,
     OriginExercise,
     RaggedCashDividends,
+    RaggedExerciseTimes,
     RandomStream,
     RegressionFitDiagnostics,
     UniformExerciseMesh,
@@ -40,6 +42,7 @@ from finoptions import (
 _PATHS = 4_096
 _INTERVALS = 8
 _ROWS = 2
+_TERMINAL_FULL_EXERCISE_NODES = 3
 _ORIGIN_INTRINSIC = 100.0
 
 Float64Vector = npt.NDArray[np.float64]
@@ -515,6 +518,173 @@ def test_cash_dividend_date_mesh_matches_the_same_explicit_opportunity_set_bitwi
         ),
     )
     assert_batch_equal(specialized, explicit)
+
+
+def test_explicit_exercise_mesh_preserves_exact_terminal_cash_geometry() -> None:
+    """Exact row schedules admit terminal cash without moving either event or predecessor."""
+    common = {
+        "initial_spots": np.array([100.0], dtype=np.float64),
+        "strikes": np.array([100.0], dtype=np.float64),
+        "maturities": np.array([1.0], dtype=np.float64),
+        "rates": np.array([0.03], dtype=np.float64),
+        "volatilities": np.array([0.25], dtype=np.float64),
+        "dividends": CashDividendBatch(
+            schedules=RaggedCashDividends(
+                offsets=np.array([0, 1], dtype=np.int64),
+                times=np.array([1.0], dtype=np.float64),
+                amounts=np.array([4.0], dtype=np.float64),
+            ),
+            policy=DividendPolicy.LIQUIDATOR,
+            maturity_boundary=MaturityBoundary.AT_OR_BEFORE,
+        ),
+        "executor": CpuExecutor(threads=1),
+        "method": method(training_domain=1_401, evaluation_domain=91_401, paths=2_048),
+    }
+    uniform = price_lsm_call_batch(
+        **common,
+        mesh=UniformExerciseMesh(
+            base_intervals=4,
+            origin_exercise=OriginExercise.EXCLUDED,
+        ),
+    )
+    exact = price_lsm_call_batch(
+        **common,
+        mesh=ExplicitExerciseMesh(
+            schedules=RaggedExerciseTimes(
+                offsets=np.array([0, 3], dtype=np.int64),
+                times=np.array([0.25, 0.5, 0.75], dtype=np.float64),
+            ),
+            origin_exercise=OriginExercise.EXCLUDED,
+        ),
+    )
+    assert_batch_equal(exact, uniform)
+    assert exact.regression_nodes[0] == _TERMINAL_FULL_EXERCISE_NODES
+
+    predecessor_mesh = ExplicitExerciseMesh(
+        schedules=RaggedExerciseTimes(
+            offsets=np.array([0, 1], dtype=np.int64),
+            times=np.array([255.0 / 256.0], dtype=np.float64),
+        ),
+        origin_exercise=OriginExercise.EXCLUDED,
+    )
+    sparse_serial = price_lsm_call_batch(**common, mesh=predecessor_mesh)
+    sparse_parallel = price_lsm_call_batch(
+        initial_spots=np.array([100.0], dtype=np.float64),
+        strikes=np.array([100.0], dtype=np.float64),
+        maturities=np.array([1.0], dtype=np.float64),
+        rates=np.array([0.03], dtype=np.float64),
+        volatilities=np.array([0.25], dtype=np.float64),
+        dividends=common["dividends"],
+        mesh=predecessor_mesh,
+        executor=CpuExecutor(threads=2),
+        method=common["method"],
+    )
+    assert_batch_equal(sparse_serial, sparse_parallel)
+    assert sparse_serial.regression_nodes[0] == 1
+
+
+def test_explicit_exercise_mesh_fails_before_paths_on_every_time_or_shape_error() -> None:
+    """No schedule is sorted, deduplicated, clipped to expiry, or broadcast across rows."""
+    with pytest.raises(ValueError, match="strictly increasing"):
+        RaggedExerciseTimes(
+            offsets=np.array([0, 2], dtype=np.int64),
+            times=np.array([0.5, 0.5], dtype=np.float64),
+        )
+
+    common = {
+        "initial_spots": np.array([100.0], dtype=np.float64),
+        "strikes": np.array([100.0], dtype=np.float64),
+        "maturities": np.array([1.0], dtype=np.float64),
+        "rates": np.array([0.03], dtype=np.float64),
+        "volatilities": np.array([0.25], dtype=np.float64),
+        "dividends": ContinuousDividendYieldBatch(
+            annualized_decimals=np.array([0.0], dtype=np.float64)
+        ),
+        "executor": CpuExecutor(threads=1),
+        "method": method(training_domain=1_501, evaluation_domain=91_501, paths=512),
+    }
+    at_expiry = ExplicitExerciseMesh(
+        schedules=RaggedExerciseTimes(
+            offsets=np.array([0, 1], dtype=np.int64),
+            times=np.array([1.0], dtype=np.float64),
+        ),
+        origin_exercise=OriginExercise.EXCLUDED,
+    )
+    with pytest.raises(InputError, match=r"must be strictly before maturity.*1\.0"):
+        price_lsm_call_batch(**common, mesh=at_expiry)
+
+    wrong_rows = ExplicitExerciseMesh(
+        schedules=RaggedExerciseTimes(
+            offsets=np.array([0, 0, 0], dtype=np.int64),
+            times=np.array([], dtype=np.float64),
+        ),
+        origin_exercise=OriginExercise.EXCLUDED,
+    )
+    with pytest.raises(InputError, match="have 2 rows; expected 1"):
+        price_lsm_call_batch(**common, mesh=wrong_rows)
+
+
+def test_explicit_exercise_mesh_is_identical_for_row_and_grouped_continuous_batches() -> None:
+    """Row/group native routes preserve the same explicitly listed opportunity sets."""
+    spots = np.array([100.0, 120.0], dtype=np.float64)
+    strikes = np.array([100.0, 110.0], dtype=np.float64)
+    maturities = np.array([1.0, 0.75], dtype=np.float64)
+    rates = np.array([0.05, 0.03], dtype=np.float64)
+    volatilities = np.array([0.25, 0.30], dtype=np.float64)
+    dividends = ContinuousDividendYieldBatch(
+        annualized_decimals=np.array([0.02, 0.01], dtype=np.float64)
+    )
+    explicit = ExplicitExerciseMesh(
+        schedules=RaggedExerciseTimes(
+            offsets=np.array([0, 1, 2], dtype=np.int64),
+            times=np.array([0.5, 0.375], dtype=np.float64),
+        ),
+        origin_exercise=OriginExercise.EXCLUDED,
+    )
+    uniform = UniformExerciseMesh(
+        base_intervals=2,
+        origin_exercise=OriginExercise.EXCLUDED,
+    )
+    estimator = method(training_domain=1_601, evaluation_domain=91_601, paths=2_048)
+    executor = CpuExecutor(threads=2)
+    row_common = {
+        "initial_spots": spots,
+        "strikes": strikes,
+        "maturities": maturities,
+        "rates": rates,
+        "volatilities": volatilities,
+        "dividends": dividends,
+        "executor": executor,
+        "method": estimator,
+    }
+    assert_batch_equal(
+        price_lsm_call_batch(**row_common, mesh=explicit),
+        price_lsm_call_batch(**row_common, mesh=uniform),
+    )
+
+    groups = LsmStrikeGroups(
+        group_offsets=np.array([0, 1, 2], dtype=np.uint32),
+        initial_spots=spots,
+        strikes=strikes,
+        maturities=maturities,
+        rates=rates,
+        volatilities=volatilities,
+        dividends=dividends,
+    )
+    assert_batch_equal(
+        price_lsm_call_grouped_batch(
+            groups=groups,
+            mesh=explicit,
+            executor=executor,
+            method=estimator,
+        ),
+        price_lsm_call_grouped_batch(
+            groups=groups,
+            mesh=uniform,
+            executor=executor,
+            method=estimator,
+        ),
+    )
 
 
 def test_cash_dividend_date_mesh_rejects_every_out_of_domain_request() -> None:

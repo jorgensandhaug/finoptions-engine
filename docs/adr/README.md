@@ -20,3 +20,5 @@ repository.
 - [ADR 0014: Terminal cash-event order](0014-terminal-cash-event-order.md)
 - [ADR 0015: Explicit insufficient-exercise-support policy](0015-explicit-insufficient-exercise-support.md)
 - [ADR 0016: Explicit cash-dividend-date exercise mesh](0016-cash-dividend-date-exercise-mesh.md)
+- [ADR 0017: Event-aligned direct quadrature](0017-event-aligned-direct-quadrature.md)
+- [ADR 0018: Exact row-aligned exercise-time batches](0018-exact-row-aligned-exercise-times.md)
