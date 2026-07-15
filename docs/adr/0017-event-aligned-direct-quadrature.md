@@ -76,7 +76,9 @@ the no-dividend American-call identity in its nonnegative-rate domain, exact ter
 equivalence to an increased strike, and the published one-dividend liquidator value. The latter is
 computed independently by adaptive integration in `finoptions-testkit`; a separate 16,000-step
 interpolated CRR tree agrees within `5e-5`. Serial and dedicated-pool direct integration are bitwise
-identical under the portable scalar exponential backend.
+identical under the portable scalar exponential backend. A separate 256-opportunity terminal-cash
+Bermudan case also agrees with a 16,384-step interpolated CRR tree within `0.002`, independently
+checking the pre-expiry exercise sequence and terminal cash-before-payoff order together.
 
 On an Apple M4 Pro, the release Python operation for the published one-dividend case with 20,001
 stock points measured median wall times of 42.39 ms at order 1,024 on one thread and 10.98 ms on four

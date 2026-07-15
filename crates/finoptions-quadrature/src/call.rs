@@ -737,6 +737,49 @@ mod tests {
     }
 
     #[test]
+    fn terminal_cash_bermudan_schedule_agrees_with_the_independent_interpolated_tree() {
+        let intervals = 256_u32;
+        let intervals_usize = usize::try_from(intervals).unwrap();
+        let times = (0..=intervals)
+            .map(|node| f64::from(node) / f64::from(intervals))
+            .collect::<Vec<_>>();
+        let exercises = (0..intervals_usize).collect::<Vec<_>>();
+        let terminal_cash = schedule(&times, &[(intervals_usize, 4.0)], &exercises);
+        let (curve, dividend_yield_curve) = model_curves(&terminal_cash, 0.03, 0.0);
+        let quadrature = EventAlignedQuadrature::try_new(
+            EventAlignedQuadratureSpec::try_new(400.0, 10_001, 512).unwrap(),
+        )
+        .unwrap();
+        let observed = quadrature
+            .price_call(
+                &CpuExecutor::try_new(4).unwrap(),
+                100.0,
+                100.0,
+                &terminal_cash,
+                &curve,
+                &dividend_yield_curve,
+                ConstantVolatility::try_new(0.25).unwrap(),
+                DividendPolicy::Liquidator,
+            )
+            .unwrap();
+        let independent = interpolated_crr_call(
+            100.0,
+            100.0,
+            &terminal_cash,
+            &curve,
+            &dividend_yield_curve,
+            ConstantVolatility::try_new(0.25).unwrap(),
+            DividendPolicy::Liquidator,
+            16_384,
+        )
+        .unwrap();
+        assert!(
+            (observed.price() - independent).abs() <= 2.0e-3,
+            "quadrature={observed:?}, tree={independent}",
+        );
+    }
+
+    #[test]
     fn serial_and_dedicated_pool_results_are_bitwise_identical() {
         let one_dividend = schedule(&[0.0, 0.5, 1.0], &[(1, 7.0)], &[1]);
         assert_eq!(
