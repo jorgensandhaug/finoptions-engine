@@ -20,9 +20,11 @@ retrying through the scalar implementation would hide a backend failure.
 `apple_accelerate`. The default is the named portable backend; Apple execution must be requested.
 The Apple backend uses vForce for GBM exponentials. On AArch64 macOS, it uses a fused NEON kernel for
 the three reductions and squared-basis scratch required by each empirical orthogonal-polynomial
-basis column. Other macOS architectures retain vDSP. Architecture dispatch is fixed at compile
-time inside the already explicit backend; unavailable backends, malformed operands, and kernel
-failures return typed errors and are never substituted.
+basis column. For every later column, a second fused NEON kernel constructs the next three-term-
+recurrence basis and accumulates those same moments in one traversal. Other macOS architectures
+retain vDSP for the initial moments and a checked scalar fused recurrence/moment traversal.
+Architecture dispatch is fixed at compile time inside the already explicit backend; unavailable
+backends, malformed operands, and kernel failures return typed errors and are never substituted.
 
 Apple-specific unsafe vector code lives alone in `finoptions-accelerate`, whose
 [safety contract](../../crates/finoptions-accelerate/SAFETY.md) covers buffer lifetime,

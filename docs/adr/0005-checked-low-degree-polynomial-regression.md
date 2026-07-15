@@ -71,6 +71,12 @@ selection with validation and ordered Welford statistics reduced a stable one-th
 [fused-population checkpoint](../performance/2026-07-15-fused-regression-population.md) for the
 profile, rejected candidates, exact A/B scope, and invalidated scalar timing.
 
+The subsequent fused recurrence/moment kernel removes one path traversal for each nonconstant
+orthogonal basis column without changing the recurrence or its reduction order. It reduced the
+same complete Apple workload by 6.9% at adjacent mean centers and the portable scalar workload by
+6.4%. The differential, SIMD-tail, SVD, and end-to-end evidence is recorded in the
+[fused-recurrence checkpoint](../performance/2026-07-15-fused-orthogonal-recurrence-moments.md).
+
 ## Consequences
 
 - The paper's degree-four estimator has a small, auditable, fail-fast kernel.

@@ -2,7 +2,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 #[cfg(target_os = "macos")]
-use finoptions_accelerate::polynomial_moments_f64;
+use finoptions_accelerate::{polynomial_moments_f64, polynomial_recurrence_moments_f64};
 
 #[cfg(target_os = "macos")]
 #[link(name = "Accelerate", kind = "framework")]
@@ -95,6 +95,26 @@ fn scalar_moments(predictors: &[f64], responses: &[f64], basis: &[f64]) -> (f64,
     (norm, projection, weighted_predictor)
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn separate_recurrence_moments_reference(
+    predictors: &[f64],
+    responses: &[f64],
+    previous: &[f64],
+    current: &[f64],
+    next: &mut [f64],
+    squared: &mut [f64],
+    alpha: f64,
+    beta: f64,
+) -> (f64, f64, f64) {
+    for (((&predictor, &previous), &current), next) in
+        predictors.iter().zip(previous).zip(current).zip(&mut *next)
+    {
+        *next = (predictor - alpha).mul_add(current, -beta * previous);
+    }
+    polynomial_moments_f64(predictors, responses, next, squared).unwrap()
+}
+
 fn benchmark(c: &mut Criterion) {
     let observations = 500_usize;
     let predictors = (0..observations)
@@ -148,6 +168,55 @@ fn benchmark(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    #[cfg(target_os = "macos")]
+    {
+        let previous = predictors
+            .iter()
+            .map(|predictor| predictor.mul_add(-0.2, 0.3))
+            .collect::<Vec<_>>();
+        let current = predictors
+            .iter()
+            .map(|predictor| predictor.mul_add(*predictor, 0.7))
+            .collect::<Vec<_>>();
+        let mut next = vec![0.0; observations];
+        let mut squared = vec![0.0; observations];
+        let alpha = 0.17;
+        let beta = 0.23;
+        let mut group = c.benchmark_group("polynomial_recurrence_moments_f64");
+        group.throughput(Throughput::Elements(u64::try_from(observations).unwrap()));
+        group.bench_function("separate_recurrence_then_moments", |bencher| {
+            bencher.iter(|| {
+                black_box(separate_recurrence_moments_reference(
+                    black_box(&predictors),
+                    black_box(&responses),
+                    black_box(&previous),
+                    black_box(&current),
+                    black_box(&mut next),
+                    black_box(&mut squared),
+                    alpha,
+                    beta,
+                ));
+            });
+        });
+        group.bench_function("fused_apple_production", |bencher| {
+            bencher.iter(|| {
+                black_box(
+                    polynomial_recurrence_moments_f64(
+                        black_box(&predictors),
+                        black_box(&responses),
+                        black_box(&previous),
+                        black_box(&current),
+                        black_box(&mut next),
+                        alpha,
+                        beta,
+                    )
+                    .unwrap(),
+                );
+            });
+        });
+        group.finish();
+    }
 }
 
 criterion_group!(benches, benchmark);

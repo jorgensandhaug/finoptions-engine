@@ -87,9 +87,10 @@ to the global thread pool or another backend.
 `CpuExecutor` defaults to the portable `CpuMathBackend.RUST_STD_F64`. On macOS, callers may request
 `CpuMathBackend.APPLE_ACCELERATE` explicitly; unsupported platforms fail during executor
 construction. The Apple backend uses Accelerate vForce for GBM exponentials. On Apple Silicon it
-uses the baseline AArch64 NEON ISA for fused continuation-regression reductions; other macOS
-architectures retain vDSP. The selected backend is inspectable and belongs in every reproducible
-execution manifest because vector and scalar implementations need not return identical bits.
+uses the baseline AArch64 NEON ISA for fused continuation-regression recurrences and reductions;
+other macOS architectures retain vDSP. The selected backend is inspectable and belongs in every
+reproducible execution manifest because vector and scalar implementations need not return identical
+bits.
 
 The same executor builds model inputs without storing a second padded dataset:
 

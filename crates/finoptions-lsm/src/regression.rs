@@ -426,15 +426,16 @@ impl RegressionWorkspace {
         let mut coefficients = [0.0; MAX_BASIS_COLUMNS];
         let mut norms = [0.0; MAX_BASIS_COLUMNS];
         let mut previous_norm = 1.0;
+        let mut pending_moments = moments(
+            math_backend,
+            &self.standardized,
+            responses,
+            &self.current,
+            &mut self.next,
+        )?;
 
         for basis_degree in 0..=degree {
-            let (norm, projection, weighted_predictor) = moments(
-                math_backend,
-                &self.standardized,
-                responses,
-                &self.current,
-                &mut self.next,
-            )?;
+            let (norm, projection, weighted_predictor) = pending_moments;
             if !norm.is_finite() || !projection.is_finite() || !weighted_predictor.is_finite() {
                 return Err(RegressionError::NonFiniteFit { basis_degree });
             }
@@ -472,17 +473,20 @@ impl RegressionWorkspace {
                 if !alphas[basis_degree].is_finite() || !betas[basis_degree].is_finite() {
                     return Err(RegressionError::NonFiniteFit { basis_degree });
                 }
-                for (((&standardized, &previous), &current), next) in self
-                    .standardized
-                    .iter()
-                    .zip(&self.previous)
-                    .zip(&self.current)
-                    .zip(&mut self.next)
+                pending_moments = recurrence_moments(
+                    math_backend,
+                    &self.standardized,
+                    responses,
+                    &self.previous,
+                    &self.current,
+                    &mut self.next,
+                    alphas[basis_degree],
+                    betas[basis_degree],
+                )?;
+                if !pending_moments.0.is_finite()
+                    || !pending_moments.1.is_finite()
+                    || !pending_moments.2.is_finite()
                 {
-                    *next = (standardized - alphas[basis_degree])
-                        .mul_add(current, -betas[basis_degree] * previous);
-                }
-                if self.next.iter().any(|value| !value.is_finite()) {
                     return Err(RegressionError::NonFiniteFit {
                         basis_degree: basis_degree + 1,
                     });
@@ -654,6 +658,33 @@ fn moments(
 ) -> Result<(f64, f64, f64), RegressionError> {
     math_backend
         .polynomial_moments_f64(standardized, responses, basis, squared_basis)
+        .map_err(|source| RegressionError::CpuMath {
+            backend: math_backend.as_str(),
+            source,
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recurrence_moments(
+    math_backend: CpuMathBackend,
+    standardized: &[f64],
+    responses: &[f64],
+    previous_basis: &[f64],
+    current_basis: &[f64],
+    next_basis: &mut [f64],
+    alpha: f64,
+    beta: f64,
+) -> Result<(f64, f64, f64), RegressionError> {
+    math_backend
+        .polynomial_recurrence_moments_f64(
+            standardized,
+            responses,
+            previous_basis,
+            current_basis,
+            next_basis,
+            alpha,
+            beta,
+        )
         .map_err(|source| RegressionError::CpuMath {
             backend: math_backend.as_str(),
             source,

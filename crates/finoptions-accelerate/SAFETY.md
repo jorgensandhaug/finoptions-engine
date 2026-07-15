@@ -20,12 +20,20 @@ scratch disjoint from all three immutable inputs. Empty slices return the three 
 without entering a native kernel. The runtime validates the same contract before choosing either
 the portable or explicitly requested Apple backend.
 
+The fused recurrence kernel similarly requires equal predictor, response, previous-basis,
+current-basis, and mutable next-basis lengths. The next-basis output is a distinct mutable borrow,
+so it cannot alias any input. Each lane computes
+`(predictor - alpha).mul_add(current, -beta * previous)`, stores that value, and accumulates its
+norm, response projection, and predictor-weighted squared norm. The same common-length proof bounds
+every access; an empty request writes nothing and returns three zero reductions.
+
 On AArch64 macOS, NEON is part of the baseline ISA. The implementation loads and stores two `f64`
 lanes only under a remaining-length proof, processes eight elements through four independent
 accumulators, then handles a two-element vector tail and at most one scalar element. Pointer
 addition is therefore bounded by the common slice length. Horizontal reduction occurs only after
 all vector loads and stores complete. The `#[target_feature(enable = "neon")]` function is called
-only from the AArch64-specific safe wrapper.
+only from the AArch64-specific safe wrapper. Both the basis-only and recurrence/moment kernels use
+this block/tail structure.
 
 On non-AArch64 macOS, the wrapper retains `vDSP_vsqD` and `vDSP_dotprD` with unit strides and the
 SDK's `vDSP_Length`/`vDSP_Stride` ABI widths (`usize`/`isize` on supported 64-bit targets). Scalar

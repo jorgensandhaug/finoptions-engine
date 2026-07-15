@@ -99,6 +99,75 @@ impl CpuMathBackend {
             }
         }
     }
+
+    /// Constructs the next empirical orthogonal basis vector and computes its moments in one pass.
+    ///
+    /// The recurrence is `next = (predictor - alpha) * current - beta * previous`. Every operand
+    /// length is validated before output is written, and the selected backend is never changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed length or unavailable-backend error without retrying another implementation.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn polynomial_recurrence_moments_f64(
+        self,
+        predictors: &[f64],
+        responses: &[f64],
+        previous_basis: &[f64],
+        current_basis: &[f64],
+        next_basis_output: &mut [f64],
+        alpha: f64,
+        beta: f64,
+    ) -> Result<(f64, f64, f64), CpuMathError> {
+        const OPERATION: &str = "polynomial_recurrence_moments_f64";
+        let expected = predictors.len();
+        for (operand, observed) in [
+            ("responses", responses.len()),
+            ("previous_basis", previous_basis.len()),
+            ("current_basis", current_basis.len()),
+            ("next_basis_output", next_basis_output.len()),
+        ] {
+            if observed != expected {
+                return Err(CpuMathError::OperandLengthMismatch {
+                    operation: OPERATION,
+                    operand,
+                    expected,
+                    observed,
+                });
+            }
+        }
+        match self {
+            Self::RustStdF64 => {
+                let mut norm = 0.0;
+                let mut projection = 0.0;
+                let mut weighted_predictor = 0.0;
+                for ((((predictor, response), previous), current), next) in predictors
+                    .iter()
+                    .zip(responses)
+                    .zip(previous_basis)
+                    .zip(current_basis)
+                    .zip(next_basis_output)
+                {
+                    *next = (*predictor - alpha).mul_add(*current, -beta * *previous);
+                    let squared = *next * *next;
+                    norm += squared;
+                    projection = response.mul_add(*next, projection);
+                    weighted_predictor = predictor.mul_add(squared, weighted_predictor);
+                }
+                Ok((norm, projection, weighted_predictor))
+            }
+            Self::AppleAccelerate => apple_polynomial_recurrence_moments_f64(
+                predictors,
+                responses,
+                previous_basis,
+                current_basis,
+                next_basis_output,
+                alpha,
+                beta,
+            ),
+        }
+    }
 }
 
 /// A requested CPU math operation cannot honor its exact backend/buffer contract.
@@ -176,12 +245,63 @@ fn apple_polynomial_moments_f64(
         })
 }
 
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn apple_polynomial_recurrence_moments_f64(
+    predictors: &[f64],
+    responses: &[f64],
+    previous_basis: &[f64],
+    current_basis: &[f64],
+    next_basis_output: &mut [f64],
+    alpha: f64,
+    beta: f64,
+) -> Result<(f64, f64, f64), CpuMathError> {
+    finoptions_accelerate::polynomial_recurrence_moments_f64(
+        predictors,
+        responses,
+        previous_basis,
+        current_basis,
+        next_basis_output,
+        alpha,
+        beta,
+    )
+    .map_err(|error| match error {
+        finoptions_accelerate::VectorKernelError::OperandLengthMismatch {
+            operation,
+            operand,
+            expected,
+            observed,
+        } => CpuMathError::OperandLengthMismatch {
+            operation,
+            operand,
+            expected,
+            observed,
+        },
+    })
+}
+
 #[cfg(not(target_os = "macos"))]
 fn apple_polynomial_moments_f64(
     _predictors: &[f64],
     _responses: &[f64],
     _basis: &[f64],
     _squared_basis: &mut [f64],
+) -> Result<(f64, f64, f64), CpuMathError> {
+    Err(CpuMathError::BackendUnavailable {
+        backend: CpuMathBackend::AppleAccelerate.as_str(),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn apple_polynomial_recurrence_moments_f64(
+    _predictors: &[f64],
+    _responses: &[f64],
+    _previous_basis: &[f64],
+    _current_basis: &[f64],
+    _next_basis_output: &mut [f64],
+    _alpha: f64,
+    _beta: f64,
 ) -> Result<(f64, f64, f64), CpuMathError> {
     Err(CpuMathError::BackendUnavailable {
         backend: CpuMathBackend::AppleAccelerate.as_str(),
@@ -365,6 +485,39 @@ mod tests {
                 .unwrap(),
             (5.0, 4.0, 6.5),
         );
+
+        assert_eq!(
+            CpuMathBackend::RustStdF64.polynomial_recurrence_moments_f64(
+                &[0.5, 1.5],
+                &[2.0, 3.0],
+                &[0.0],
+                &[1.0, 1.0],
+                &mut scratch,
+                0.0,
+                0.0,
+            ),
+            Err(CpuMathError::OperandLengthMismatch {
+                operation: "polynomial_recurrence_moments_f64",
+                operand: "previous_basis",
+                expected: 2,
+                observed: 1,
+            })
+        );
+        assert_eq!(scratch.map(f64::to_bits), [7.0, 7.0].map(f64::to_bits));
+
+        let observed = CpuMathBackend::RustStdF64
+            .polynomial_recurrence_moments_f64(
+                &[0.5, 1.5],
+                &[2.0, 3.0],
+                &[0.0, 1.0],
+                &[1.0, 2.0],
+                &mut scratch,
+                0.5,
+                0.25,
+            )
+            .unwrap();
+        assert_eq!(scratch.map(f64::to_bits), [0.0, 1.75].map(f64::to_bits));
+        assert_eq!(observed, (3.0625, 5.25, 4.59375));
     }
 
     #[test]
