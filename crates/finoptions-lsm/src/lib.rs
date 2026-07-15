@@ -8,7 +8,7 @@ mod regression;
 pub use error::{LsmError, RegressionError};
 pub use policy::{
     ExerciseFitDiagnostics, ExerciseNodeDiagnostics, ExerciseTieRule, FittedLsmCallPolicy,
-    LsmCallEstimator, LsmEvaluation, LsmRun,
+    InsufficientExerciseSupportPolicy, LsmCallEstimator, LsmEvaluation, LsmRun,
 };
 pub use regression::{
     MAX_POLYNOMIAL_DEGREE, PolynomialDegree, PolynomialRegressionSpec, RegressionDiagnostics,

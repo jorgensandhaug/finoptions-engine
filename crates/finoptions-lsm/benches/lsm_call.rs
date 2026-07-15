@@ -6,7 +6,8 @@ use finoptions_core::{
     LogDiscountCurve, TimeGrid,
 };
 use finoptions_lsm::{
-    ExerciseTieRule, LsmCallEstimator, PolynomialDegree, PolynomialRegressionSpec,
+    ExerciseTieRule, InsufficientExerciseSupportPolicy, LsmCallEstimator, PolynomialDegree,
+    PolynomialRegressionSpec,
 };
 use finoptions_sim::{CpuExecutor, GbmPathPlan, RandomStream};
 
@@ -75,7 +76,13 @@ fn estimator() -> LsmCallEstimator {
     let regression =
         PolynomialRegressionSpec::try_new(PolynomialDegree::try_new(4).unwrap(), 1.0e-12, 1.0e8)
             .unwrap();
-    LsmCallEstimator::try_new(100.0, regression, ExerciseTieRule::StrictlyGreater).unwrap()
+    LsmCallEstimator::try_new(
+        100.0,
+        regression,
+        ExerciseTieRule::StrictlyGreater,
+        InsufficientExerciseSupportPolicy::Fail,
+    )
+    .unwrap()
 }
 
 fn benchmark(c: &mut Criterion) {

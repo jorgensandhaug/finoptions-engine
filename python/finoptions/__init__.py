@@ -34,6 +34,8 @@ from .dividends import (
 from .lsm import (
     ExerciseFitDiagnostics,
     ExerciseTieRule,
+    InsufficientExerciseSupportDiagnostics,
+    InsufficientExerciseSupportPolicy,
     Lsm,
     LsmError,
     LsmResult,
@@ -99,6 +101,8 @@ __all__ = [
     "ExerciseTieRule",
     "GbmPaths",
     "InputError",
+    "InsufficientExerciseSupportDiagnostics",
+    "InsufficientExerciseSupportPolicy",
     "LogDiscountCurve",
     "Lsm",
     "LsmBatchResult",

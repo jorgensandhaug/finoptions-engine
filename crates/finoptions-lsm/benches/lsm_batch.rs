@@ -9,8 +9,9 @@ use finoptions_core::{
 };
 use finoptions_lsm::{
     BatchDividendModel, BatchLsmCallInputs, BatchLsmCallMethod, BatchRandomStreams,
-    ExerciseTieRule, GroupedBatchLsmCallInputs, LsmCallEstimator, OriginExercise, PolynomialDegree,
-    PolynomialRegressionSpec, UniformExerciseMesh,
+    ExerciseTieRule, GroupedBatchLsmCallInputs, InsufficientExerciseSupportPolicy,
+    LsmCallEstimator, OriginExercise, PolynomialDegree, PolynomialRegressionSpec,
+    UniformExerciseMesh,
 };
 use finoptions_sim::{CpuExecutor, CpuMathBackend, GbmPathPlan, RandomStream};
 
@@ -284,6 +285,7 @@ fn batch_method() -> BatchLsmCallMethod {
         EVALUATION_PATHS,
         regression(),
         ExerciseTieRule::StrictlyGreater,
+        InsufficientExerciseSupportPolicy::Fail,
         BatchRandomStreams::new(
             TRAINING_SEED,
             EVALUATION_SEED,
@@ -302,6 +304,7 @@ fn scalar_repeated(workload: &Workload, executor: &CpuExecutor) -> f64 {
             workload.strikes[row],
             regression(),
             ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
         )
         .unwrap()
         .price_seeded(

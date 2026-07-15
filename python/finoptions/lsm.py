@@ -30,6 +30,28 @@ class ExerciseTieRule(StrEnum):
     GREATER_OR_EQUAL = "greater_or_equal"
 
 
+class InsufficientExerciseSupportPolicy(StrEnum):
+    """Declared stopping rule when in-the-money rows cannot identify the polynomial basis."""
+
+    FAIL = "fail"
+    CONTINUE = "continue"
+
+
+def _validate_random_streams(training: RandomStream, evaluation: RandomStream) -> None:
+    if type(training) is not RandomStream:
+        msg = "training_stream must be RandomStream"
+        raise InputError(msg)
+    if type(evaluation) is not RandomStream:
+        msg = "evaluation_stream must be RandomStream"
+        raise InputError(msg)
+    if training.domain == evaluation.domain:
+        msg = (
+            "training_stream and evaluation_stream must use different domains; "
+            f"both use {training.domain}"
+        )
+        raise InputError(msg)
+
+
 @dataclass(frozen=True, slots=True)
 class Lsm:
     """Complete simulation/regression identity for independent-policy LSM.
@@ -42,6 +64,7 @@ class Lsm:
     evaluation_paths: int
     training_stream: RandomStream
     evaluation_stream: RandomStream
+    insufficient_exercise_support: InsufficientExerciseSupportPolicy
     polynomial_degree: int = 4
     rank_tolerance: float = 1.0e-12
     condition_limit: float = 1.0e8
@@ -56,16 +79,11 @@ class Lsm:
             if type(value) is not int or not 1 <= value <= _MAX_PATHS:
                 msg = f"{field} must be a plain int in [1, {_MAX_PATHS}]; observed {value!r}"
                 raise InputError(msg)
-        if type(self.training_stream) is not RandomStream:
-            msg = "training_stream must be RandomStream"
-            raise InputError(msg)
-        if type(self.evaluation_stream) is not RandomStream:
-            msg = "evaluation_stream must be RandomStream"
-            raise InputError(msg)
-        if self.training_stream.domain == self.evaluation_stream.domain:
+        _validate_random_streams(self.training_stream, self.evaluation_stream)
+        if type(self.insufficient_exercise_support) is not InsufficientExerciseSupportPolicy:
             msg = (
-                "training_stream and evaluation_stream must use different domains; "
-                f"both use {self.training_stream.domain}"
+                "insufficient_exercise_support must be InsufficientExerciseSupportPolicy; "
+                f"observed {type(self.insufficient_exercise_support).__name__}"
             )
             raise InputError(msg)
         if (
@@ -120,6 +138,15 @@ class NoInTheMoneyPathsDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class InsufficientExerciseSupportDiagnostics:
+    """Declared continuation at a node whose training population cannot identify the basis."""
+
+    node: int
+    in_the_money_paths: int
+    required_paths: int
+
+
+@dataclass(frozen=True, slots=True)
 class RegressionFitDiagnostics:
     """Accepted continuation regression population and numerical diagnostics."""
 
@@ -134,7 +161,10 @@ class RegressionFitDiagnostics:
 
 
 type ExerciseFitDiagnostics = (
-    OriginDecisionDiagnostics | NoInTheMoneyPathsDiagnostics | RegressionFitDiagnostics
+    OriginDecisionDiagnostics
+    | NoInTheMoneyPathsDiagnostics
+    | InsufficientExerciseSupportDiagnostics
+    | RegressionFitDiagnostics
 )
 
 
@@ -183,6 +213,12 @@ def _fit_diagnostic(raw: _native.NativeExerciseDiagnostic) -> ExerciseFitDiagnos
         )
     if kind == "no_in_the_money_paths":
         return NoInTheMoneyPathsDiagnostics(node=node)
+    if kind == "insufficient_exercise_support":
+        return InsufficientExerciseSupportDiagnostics(
+            node=node,
+            in_the_money_paths=_required(in_the_money_paths, field="in-the-money path count"),
+            required_paths=_required(columns, field="required regression path count"),
+        )
     if kind == "regression":
         return RegressionFitDiagnostics(
             node=node,
@@ -299,6 +335,7 @@ def price_lsm_call(  # noqa: PLR0913 - financial inputs remain independently typ
         method.rank_tolerance,
         method.condition_limit,
         method.tie_rule.value,
+        method.insufficient_exercise_support.value,
     )
     (
         price,
@@ -323,6 +360,8 @@ def price_lsm_call(  # noqa: PLR0913 - financial inputs remain independently typ
 __all__ = [
     "ExerciseFitDiagnostics",
     "ExerciseTieRule",
+    "InsufficientExerciseSupportDiagnostics",
+    "InsufficientExerciseSupportPolicy",
     "Lsm",
     "LsmError",
     "LsmResult",

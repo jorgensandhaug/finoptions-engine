@@ -29,6 +29,7 @@ type NativeBatchLsmResult = tuple[
     npt.NDArray[np.uint32],
     npt.NDArray[np.uint32],
     npt.NDArray[np.uint32],
+    npt.NDArray[np.uint32],
     npt.NDArray[np.float64],
     npt.NDArray[np.uint32],
     npt.NDArray[np.uint32],
@@ -148,6 +149,7 @@ def price_lsm_call_seeded_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> tuple[
     float,
     int,
@@ -177,6 +179,7 @@ def price_lsm_call_batch_continuous_yield_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...
 def price_lsm_call_batch_cash_dividends_f64(
     initial_spots: npt.NDArray[np.float64],
@@ -202,6 +205,7 @@ def price_lsm_call_batch_cash_dividends_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...
 def price_lsm_call_batch_escrowed_cash_dividends_f64(
     initial_spots: npt.NDArray[np.float64],
@@ -227,6 +231,7 @@ def price_lsm_call_batch_escrowed_cash_dividends_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...
 def price_lsm_call_grouped_batch_continuous_yield_f64(
     group_offsets: npt.NDArray[np.uint32],
@@ -249,6 +254,7 @@ def price_lsm_call_grouped_batch_continuous_yield_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...
 def price_lsm_call_grouped_batch_cash_dividends_f64(
     group_offsets: npt.NDArray[np.uint32],
@@ -275,6 +281,7 @@ def price_lsm_call_grouped_batch_cash_dividends_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...
 def price_lsm_call_grouped_batch_escrowed_cash_dividends_f64(
     group_offsets: npt.NDArray[np.uint32],
@@ -301,4 +308,5 @@ def price_lsm_call_grouped_batch_escrowed_cash_dividends_f64(
     rank_tolerance: float,
     condition_limit: float,
     tie_rule: str,
+    insufficient_exercise_support: str,
 ) -> NativeBatchLsmResult: ...

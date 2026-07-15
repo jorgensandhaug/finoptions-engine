@@ -3,7 +3,7 @@
 use finoptions_batch::{CashDividendRow, MaturityBoundary, RaggedCashDividends};
 use finoptions_core::DividendPolicy;
 
-use crate::{ExerciseTieRule, PolynomialRegressionSpec};
+use crate::{ExerciseTieRule, InsufficientExerciseSupportPolicy, PolynomialRegressionSpec};
 
 use super::BatchLsmError;
 
@@ -180,6 +180,7 @@ pub struct BatchLsmCallMethod {
     evaluation_paths: usize,
     regression: PolynomialRegressionSpec,
     tie_rule: ExerciseTieRule,
+    insufficient_exercise_support: InsufficientExerciseSupportPolicy,
     random_streams: BatchRandomStreams,
 }
 
@@ -196,6 +197,7 @@ impl BatchLsmCallMethod {
         evaluation_paths: usize,
         regression: PolynomialRegressionSpec,
         tie_rule: ExerciseTieRule,
+        insufficient_exercise_support: InsufficientExerciseSupportPolicy,
         random_streams: BatchRandomStreams,
     ) -> Result<Self, BatchLsmError> {
         validate_path_count("training", training_paths)?;
@@ -211,6 +213,7 @@ impl BatchLsmCallMethod {
             evaluation_paths,
             regression,
             tie_rule,
+            insufficient_exercise_support,
             random_streams,
         })
     }
@@ -243,6 +246,12 @@ impl BatchLsmCallMethod {
     #[must_use]
     pub const fn tie_rule(self) -> ExerciseTieRule {
         self.tie_rule
+    }
+
+    /// Returns the declared stopping policy for insufficient regression support.
+    #[must_use]
+    pub const fn insufficient_exercise_support(self) -> InsufficientExerciseSupportPolicy {
+        self.insufficient_exercise_support
     }
 
     /// Returns the row-addressed fitting/evaluation random identity.

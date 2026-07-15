@@ -20,6 +20,7 @@ from finoptions import (
     EventSchedule,
     ExerciseTieRule,
     InputError,
+    InsufficientExerciseSupportPolicy,
     LogDiscountCurve,
     Lsm,
     LsmBatchResult,
@@ -61,13 +62,18 @@ def method(
     training_domain: int = 100,
     evaluation_domain: int = 10_000,
     polynomial_degree: int = 4,
+    paths: int = _PATHS,
+    insufficient_exercise_support: InsufficientExerciseSupportPolicy = (
+        InsufficientExerciseSupportPolicy.FAIL
+    ),
 ) -> Lsm:
     """Build one scalar or row-addressed independent-policy identity."""
     return Lsm(
-        training_paths=_PATHS,
-        evaluation_paths=_PATHS,
+        training_paths=paths,
+        evaluation_paths=paths,
         training_stream=RandomStream(seed=7, domain=training_domain),
         evaluation_stream=RandomStream(seed=11, domain=evaluation_domain),
+        insufficient_exercise_support=insufficient_exercise_support,
         polynomial_degree=polynomial_degree,
         rank_tolerance=1.0e-12,
         condition_limit=1.0e8,
@@ -106,6 +112,10 @@ def assert_batch_equal(left: LsmBatchResult, right: LsmBatchResult) -> None:
     assert np.array_equal(left.regression_nodes, right.regression_nodes)
     assert np.array_equal(left.no_training_support_nodes, right.no_training_support_nodes)
     assert np.array_equal(
+        left.insufficient_exercise_support_nodes,
+        right.insufficient_exercise_support_nodes,
+    )
+    assert np.array_equal(
         left.minimum_in_the_money_training_paths,
         right.minimum_in_the_money_training_paths,
     )
@@ -134,6 +144,10 @@ def assert_batch_row_equal(
     assert grouped.regression_nodes[grouped_row] == independent.regression_nodes[0]
     assert (
         grouped.no_training_support_nodes[grouped_row] == independent.no_training_support_nodes[0]
+    )
+    assert (
+        grouped.insufficient_exercise_support_nodes[grouped_row]
+        == independent.insufficient_exercise_support_nodes[0]
     )
     assert (
         grouped.minimum_in_the_money_training_paths[grouped_row]
@@ -389,6 +403,37 @@ def test_continuous_batch_is_thread_invariant_and_matches_scalar_row_bitwise() -
     )
     assert serial.early_exercise_paths[0] == sum(scalar.exercise_counts[:-1])
     assert serial.expiry_paths[0] == scalar.exercise_counts[-1]
+
+
+def test_declared_insufficient_support_policy_propagates_through_both_batch_routes() -> None:
+    """Row and grouped APIs expose forced-continuation nodes without a retry or partial fit."""
+    inputs = continuous_inputs()
+    sparse_method = method(
+        paths=4,
+        insufficient_exercise_support=InsufficientExerciseSupportPolicy.CONTINUE,
+    )
+    inputs["method"] = sparse_method
+    row = price_lsm_call_batch(**inputs, executor=CpuExecutor(threads=1))
+    grouped = price_lsm_call_grouped_batch(
+        groups=LsmStrikeGroups(
+            group_offsets=np.array([0, 1, 2], dtype=np.uint32),
+            initial_spots=inputs["initial_spots"],
+            strikes=inputs["strikes"],
+            maturities=inputs["maturities"],
+            rates=inputs["rates"],
+            volatilities=inputs["volatilities"],
+            dividends=inputs["dividends"],
+        ),
+        mesh=inputs["mesh"],
+        executor=CpuExecutor(threads=1),
+        method=sparse_method,
+    )
+    assert_batch_equal(grouped, row)
+    assert np.all(row.regression_nodes == 0)
+    assert np.all(row.no_training_support_nodes == 0)
+    assert np.all(row.insufficient_exercise_support_nodes > 0)
+    assert np.all(row.early_exercise_paths == 0)
+    assert np.all(row.expiry_paths == sparse_method.evaluation_paths)
 
 
 def test_cash_batch_inserts_exact_events_and_is_thread_invariant() -> None:

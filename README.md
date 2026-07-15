@@ -130,7 +130,12 @@ The first pricing method fits a call stopping policy and values it only on an in
 population:
 
 ```python
-from finoptions import Lsm, RandomStream, price_lsm_call
+from finoptions import (
+    InsufficientExerciseSupportPolicy,
+    Lsm,
+    RandomStream,
+    price_lsm_call,
+)
 
 result = price_lsm_call(
     initial_spot=100.0,
@@ -146,6 +151,7 @@ result = price_lsm_call(
         evaluation_paths=65_536,
         training_stream=RandomStream(seed=7, domain=1),
         evaluation_stream=RandomStream(seed=7, domain=2),
+        insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
     ),
 )
 ```
@@ -186,6 +192,7 @@ batch_result = price_lsm_call_batch(
         evaluation_paths=500,
         training_stream=RandomStream(seed=7, domain=0),
         evaluation_stream=RandomStream(seed=11, domain=1_000_000),
+        insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
     ),
 )
 ```

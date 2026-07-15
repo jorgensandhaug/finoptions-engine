@@ -193,6 +193,7 @@ class LsmBatchResult:
     origin_exercised: BoolVector
     regression_nodes: UInt32Vector
     no_training_support_nodes: UInt32Vector
+    insufficient_exercise_support_nodes: UInt32Vector
     minimum_in_the_money_training_paths: UInt32Vector
     maximum_regression_condition_numbers: Float64Vector
     early_exercise_paths: UInt32Vector
@@ -208,6 +209,11 @@ class LsmBatchResult:
             ("origin_exercised", self.origin_exercised, "bool"),
             ("regression_nodes", self.regression_nodes, "uint32"),
             ("no_training_support_nodes", self.no_training_support_nodes, "uint32"),
+            (
+                "insufficient_exercise_support_nodes",
+                self.insufficient_exercise_support_nodes,
+                "uint32",
+            ),
             (
                 "minimum_in_the_money_training_paths",
                 self.minimum_in_the_money_training_paths,
@@ -290,6 +296,7 @@ def _freeze_native_result(raw: _native.NativeBatchLsmResult) -> LsmBatchResult:
         origin_exercised,
         regression_nodes,
         no_training_support_nodes,
+        insufficient_exercise_support_nodes,
         minimum_in_the_money_training_paths,
         maximum_regression_condition_numbers,
         early_exercise_paths,
@@ -302,6 +309,7 @@ def _freeze_native_result(raw: _native.NativeBatchLsmResult) -> LsmBatchResult:
     origin_exercised.flags.writeable = False
     regression_nodes.flags.writeable = False
     no_training_support_nodes.flags.writeable = False
+    insufficient_exercise_support_nodes.flags.writeable = False
     minimum_in_the_money_training_paths.flags.writeable = False
     maximum_regression_condition_numbers.flags.writeable = False
     early_exercise_paths.flags.writeable = False
@@ -314,6 +322,7 @@ def _freeze_native_result(raw: _native.NativeBatchLsmResult) -> LsmBatchResult:
         origin_exercised=origin_exercised,
         regression_nodes=regression_nodes,
         no_training_support_nodes=no_training_support_nodes,
+        insufficient_exercise_support_nodes=insufficient_exercise_support_nodes,
         minimum_in_the_money_training_paths=minimum_in_the_money_training_paths,
         maximum_regression_condition_numbers=maximum_regression_condition_numbers,
         early_exercise_paths=early_exercise_paths,
@@ -382,6 +391,7 @@ def price_lsm_call_batch(  # noqa: PLR0913 - each financial column is independen
         method.rank_tolerance,
         method.condition_limit,
         method.tie_rule.value,
+        method.insufficient_exercise_support.value,
     )
     if type(dividends) is ContinuousDividendYieldBatch:
         raw = _native.price_lsm_call_batch_continuous_yield_f64(
@@ -483,6 +493,7 @@ def price_lsm_call_grouped_batch(
         method.rank_tolerance,
         method.condition_limit,
         method.tie_rule.value,
+        method.insufficient_exercise_support.value,
     )
     dividends = groups.dividends
     if type(dividends) is ContinuousDividendYieldBatch:

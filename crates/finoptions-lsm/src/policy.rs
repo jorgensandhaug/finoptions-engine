@@ -26,6 +26,16 @@ impl ExerciseTieRule {
     }
 }
 
+/// Declared stopping-policy behavior when a node has fewer in-the-money training rows than basis
+/// columns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsufficientExerciseSupportPolicy {
+    /// Reject the estimator fit with a typed regression error.
+    Fail,
+    /// Fit no continuation regression and require continuation at that exercise node.
+    Continue,
+}
+
 /// One exercise node's immutable policy-fitting diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExerciseFitDiagnostics {
@@ -38,6 +48,13 @@ pub enum ExerciseFitDiagnostics {
     },
     /// Training contained no in-the-money state at this node.
     NoInTheMoneyPaths,
+    /// The declared policy required continuation because regression support was insufficient.
+    InsufficientExerciseSupport {
+        /// In-the-money training rows observed at the node.
+        in_the_money_paths: u32,
+        /// Minimum rows required by the declared polynomial basis.
+        required_paths: u32,
+    },
     /// A continuation model was fitted on the declared in-the-money population.
     Regression {
         /// Training rows used by the regression.
@@ -72,6 +89,7 @@ impl ExerciseNodeDiagnostics {
 enum ExerciseRule {
     Origin { exercise: bool },
     NoTrainingSupport,
+    ContinueWithoutRegression,
     Regression(PolynomialModel),
 }
 
@@ -87,6 +105,7 @@ pub struct LsmCallEstimator {
     strike: f64,
     regression: PolynomialRegressionSpec,
     tie_rule: ExerciseTieRule,
+    insufficient_exercise_support: InsufficientExerciseSupportPolicy,
 }
 
 impl LsmCallEstimator {
@@ -100,6 +119,7 @@ impl LsmCallEstimator {
         strike: f64,
         regression: PolynomialRegressionSpec,
         tie_rule: ExerciseTieRule,
+        insufficient_exercise_support: InsufficientExerciseSupportPolicy,
     ) -> Result<Self, LsmError> {
         if !strike.is_finite() || strike <= 0.0 {
             return Err(LsmError::InvalidStrike { observed: strike });
@@ -108,6 +128,7 @@ impl LsmCallEstimator {
             strike,
             regression,
             tie_rule,
+            insufficient_exercise_support,
         })
     }
 
@@ -129,12 +150,18 @@ impl LsmCallEstimator {
         self.tie_rule
     }
 
+    /// Returns the declared policy for a regression population smaller than its basis.
+    #[must_use]
+    pub const fn insufficient_exercise_support(self) -> InsufficientExerciseSupportPolicy {
+        self.insufficient_exercise_support
+    }
+
     /// Fits a stopping policy on one training population without valuing it in sample.
     ///
     /// A valuation-origin exercise node is a common decision: the intrinsic value is compared with
     /// the mean discounted training continuation. Every positive-time exercise node fits only on
-    /// in-the-money paths. Zero such paths is recorded as absent support; a positive unsupported
-    /// population is a typed regression failure.
+    /// in-the-money paths. An unsupported population follows the estimator's explicit
+    /// [`InsufficientExerciseSupportPolicy`]. No degree or numerical method is inferred.
     ///
     /// # Errors
     ///
@@ -421,9 +448,39 @@ impl LsmCallEstimator {
             }
         }
         if candidate_population.is_empty() {
+            if self.insufficient_exercise_support == InsufficientExerciseSupportPolicy::Continue {
+                return Ok((
+                    ExerciseRule::ContinueWithoutRegression,
+                    ExerciseFitDiagnostics::InsufficientExerciseSupport {
+                        in_the_money_paths: 0,
+                        required_paths: u32::try_from(self.regression.degree().get() + 1)
+                            .expect("validated polynomial basis has at most five columns"),
+                    },
+                ));
+            }
             return Ok((
                 ExerciseRule::NoTrainingSupport,
                 ExerciseFitDiagnostics::NoInTheMoneyPaths,
+            ));
+        }
+        let in_the_money_paths = u32::try_from(candidate_population.len()).map_err(|_| {
+            LsmError::PathCountOutsideDomain {
+                population: "training in-the-money",
+                observed: candidate_population.len(),
+                maximum: u32::MAX,
+            }
+        })?;
+        let required_paths = u32::try_from(self.regression.degree().get() + 1)
+            .expect("validated polynomial basis has at most five columns");
+        if in_the_money_paths < required_paths
+            && self.insufficient_exercise_support == InsufficientExerciseSupportPolicy::Continue
+        {
+            return Ok((
+                ExerciseRule::ContinueWithoutRegression,
+                ExerciseFitDiagnostics::InsufficientExerciseSupport {
+                    in_the_money_paths,
+                    required_paths,
+                },
             ));
         }
         let model = workspace
@@ -434,13 +491,6 @@ impl LsmCallEstimator {
             })?;
         let diagnostics = model.diagnostics();
         self.apply_training_rule(node, spots, values, &model)?;
-        let in_the_money_paths = u32::try_from(candidate_population.len()).map_err(|_| {
-            LsmError::PathCountOutsideDomain {
-                population: "training in-the-money",
-                observed: candidate_population.len(),
-                maximum: u32::MAX,
-            }
-        })?;
         debug_assert!(in_the_money_paths <= training_count);
         Ok((
             ExerciseRule::Regression(model),
@@ -568,7 +618,8 @@ impl FittedLsmCallPolicy {
         let mut discounted_payoffs = vec![0.0; paths];
         for (exercise_row, rule) in self.rules.iter().enumerate() {
             match rule {
-                ExerciseRule::Origin { exercise: false } => {}
+                ExerciseRule::Origin { exercise: false }
+                | ExerciseRule::ContinueWithoutRegression => {}
                 ExerciseRule::Origin { exercise: true } => {
                     return Err(LsmError::InvalidPolicyOriginRule {
                         row: exercise_row,
@@ -1054,7 +1105,13 @@ mod tests {
             1.0e8,
         )
         .unwrap();
-        LsmCallEstimator::try_new(100.0, regression, ExerciseTieRule::StrictlyGreater).unwrap()
+        LsmCallEstimator::try_new(
+            100.0,
+            regression,
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+        )
+        .unwrap()
     }
 
     fn plan(
@@ -1105,7 +1162,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            LsmCallEstimator::try_new(0.0, regression, ExerciseTieRule::StrictlyGreater),
+            LsmCallEstimator::try_new(
+                0.0,
+                regression,
+                ExerciseTieRule::StrictlyGreater,
+                InsufficientExerciseSupportPolicy::Fail,
+            ),
             Err(LsmError::InvalidStrike { .. })
         ));
         assert!(!ExerciseTieRule::StrictlyGreater.should_exercise(1.0, 1.0));
@@ -1271,6 +1333,58 @@ mod tests {
                 source: RegressionError::DegeneratePredictor { .. }
             })
         ));
+    }
+
+    #[test]
+    fn declared_insufficient_support_continuation_fits_no_regression_or_exercise_rule() {
+        let (plan, curve) = plan(&[0.0, 0.5, 1.0], &[0.0, 0.0, 0.0], None, &[1]);
+        let training_normals = [2.0, 1.0, 0.5, 0.2, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let evaluation_normals = [2.2, 1.2, 0.7, 0.3, -4.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let training = plan.simulate(100.0, 5, &training_normals).unwrap();
+        let evaluation = plan.simulate(100.0, 5, &evaluation_normals).unwrap();
+        let regression = PolynomialRegressionSpec::try_new(
+            PolynomialDegree::try_new(4).unwrap(),
+            1.0e-12,
+            1.0e8,
+        )
+        .unwrap();
+        let strict = LsmCallEstimator::try_new(
+            100.0,
+            regression,
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
+        )
+        .unwrap();
+        assert!(matches!(
+            strict.fit(&training, &curve, 100.0),
+            Err(LsmError::RegressionAtNode {
+                node: 1,
+                source: RegressionError::InsufficientObservations {
+                    observed: 4,
+                    required: 5,
+                    degree: 4,
+                }
+            })
+        ));
+
+        let continuation = LsmCallEstimator::try_new(
+            100.0,
+            regression,
+            ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Continue,
+        )
+        .unwrap();
+        let policy = continuation.fit(&training, &curve, 100.0).unwrap();
+        assert_eq!(
+            policy.diagnostics()[0].fit(),
+            ExerciseFitDiagnostics::InsufficientExerciseSupport {
+                in_the_money_paths: 4,
+                required_paths: 5,
+            }
+        );
+        let valued = policy.evaluate(&evaluation).unwrap();
+        assert!(valued.price().is_finite());
+        assert_eq!(valued.exercise_counts(), &[0, 5]);
     }
 
     #[test]

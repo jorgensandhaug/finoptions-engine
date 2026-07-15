@@ -17,11 +17,12 @@ factors, constant-volatility risk-neutral GBM, and the dividend semantics alread
 plan. Exercise observes the pre-dividend state. Terminal expiry is not another regression node.
 
 At each positive-time exercise node, backward fitting discounts the current future-policy cashflow
-to that node and fits the accepted polynomial OLS estimator only on in-the-money paths. Zero ITM
-training paths is recorded as absent support. A positive population that cannot support the declared
-basis fails through the regression contract. A valuation-origin exercise opportunity is one common
-decision: intrinsic value is compared with the mean discounted training continuation rather than
-fitting a degenerate cross-sectional regression.
+to that node and fits the accepted polynomial OLS estimator only on in-the-money paths. The caller
+must choose the insufficient-support policy described in ADR 0015. `Fail` preserves the strict
+support-domain contract. `Continue` predeclares that a node with fewer ITM rows than basis columns
+has no fitted exercise rule and therefore requires continuation. A valuation-origin exercise
+opportunity is one common decision: intrinsic value is compared with the mean discounted training
+continuation rather than fitting a degenerate cross-sectional regression.
 
 The fitted policy is evaluated forward on a distinct population without refitting. An active
 evaluation path entering an ITM region with no training support is an error. Exercise/continuation
@@ -31,16 +32,18 @@ the independent mean, sample standard deviation, standard error, and stopping co
 Seeded fitting/evaluation must use different 32-bit Philox domains, and the exact seeded stream is
 stored in each path population. Externally supplied normal matrices receive a BLAKE3 1.8.5 content
 identity so the exact same matrix cannot be used for both roles. Seeded and external identities are
-not mixed implicitly. There is no same-path mode, degree fallback, regularization fallback, support
-expansion, or automatic exercise-schedule optimization.
+not mixed implicitly. There is no same-path mode, inferred insufficient-support behavior, degree
+fallback, regularization fallback, support expansion, or automatic exercise-schedule optimization.
 
 ## Evidence
 
 - Serial and dedicated-pool runs are bitwise identical on the same build.
 - Exact same seeded streams and exact same external path matrices are rejected.
-- Missing support, underdetermined/degenerate regression, condition failure, non-finite prediction,
+- Under `Fail`, missing evaluation support and underdetermined regression are typed errors. Under
+  `Continue`, insufficient training counts are diagnosed with observed and required rows. In both
+  policies, degenerate regression, condition failure, non-finite prediction,
   simulation/valuation-curve mismatch, training/evaluation GBM-plan mismatch, observation mismatch,
-  initial-state mismatch, and unrepresentable observation discount are typed errors.
+  initial-state mismatch, and unrepresentable observation discount remain typed errors.
 - A European-only slice discounts terminal path payoffs directly, and an origin-exercise hand case
   produces one deterministic common decision rather than a regression.
 - Twelve predeclared 65,536-training/65,536-evaluation replications of the published

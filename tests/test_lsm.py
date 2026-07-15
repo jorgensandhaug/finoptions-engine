@@ -15,6 +15,8 @@ from finoptions import (
     EventSchedule,
     ExerciseTieRule,
     InputError,
+    InsufficientExerciseSupportDiagnostics,
+    InsufficientExerciseSupportPolicy,
     LogDiscountCurve,
     Lsm,
     LsmError,
@@ -57,6 +59,7 @@ def method(*, paths: int = EVALUATION_PATHS) -> Lsm:
         evaluation_paths=paths,
         training_stream=RandomStream(seed=10_000, domain=1),
         evaluation_stream=RandomStream(seed=20_000, domain=2),
+        insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
         polynomial_degree=4,
         rank_tolerance=1.0e-12,
         condition_limit=1.0e8,
@@ -184,6 +187,7 @@ def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None
             evaluation_paths=100,
             training_stream=RandomStream(seed=1, domain=7),
             evaluation_stream=RandomStream(seed=2, domain=7),
+            insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
         )
     with pytest.raises(InputError, match="polynomial_degree"):
         Lsm(
@@ -191,6 +195,7 @@ def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None
             evaluation_paths=100,
             training_stream=RandomStream(seed=1, domain=1),
             evaluation_stream=RandomStream(seed=1, domain=2),
+            insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
             polynomial_degree=5,
         )
     with pytest.raises(InputError, match="tie_rule must be ExerciseTieRule"):
@@ -199,7 +204,19 @@ def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None
             evaluation_paths=100,
             training_stream=RandomStream(seed=1, domain=1),
             evaluation_stream=RandomStream(seed=1, domain=2),
+            insufficient_exercise_support=InsufficientExerciseSupportPolicy.FAIL,
             tie_rule=cast("ExerciseTieRule", "strictly_greater"),
+        )
+    with pytest.raises(InputError, match="insufficient_exercise_support"):
+        Lsm(
+            training_paths=100,
+            evaluation_paths=100,
+            training_stream=RandomStream(seed=1, domain=1),
+            evaluation_stream=RandomStream(seed=1, domain=2),
+            insufficient_exercise_support=cast(
+                "InsufficientExerciseSupportPolicy",
+                "continue",
+            ),
         )
 
     schedule, curve, volatility = one_dividend_inputs()
@@ -215,3 +232,39 @@ def test_lsm_configuration_and_regression_fail_instead_of_substituting() -> None
             executor=CpuExecutor(threads=1),
             method=method(paths=4),
         )
+
+
+def test_declared_insufficient_support_continuation_is_observable_policy() -> None:
+    """A requested continuation rule is diagnosed and never changes degree or solver."""
+    schedule, curve, volatility = one_dividend_inputs()
+    continuation = Lsm(
+        training_paths=4,
+        evaluation_paths=4,
+        training_stream=RandomStream(seed=10_000, domain=1),
+        evaluation_stream=RandomStream(seed=20_000, domain=2),
+        insufficient_exercise_support=InsufficientExerciseSupportPolicy.CONTINUE,
+        polynomial_degree=4,
+        rank_tolerance=1.0e-12,
+        condition_limit=1.0e8,
+        tie_rule=ExerciseTieRule.STRICTLY_GREATER,
+    )
+    result = price_lsm_call(
+        initial_spot=100.0,
+        strike=100.0,
+        schedule=schedule,
+        curve=curve,
+        dividend_yield_curve=zero_yield(schedule),
+        volatility=volatility,
+        dividend_policy=DividendPolicy.LIQUIDATOR,
+        executor=CpuExecutor(threads=1),
+        method=continuation,
+    )
+    assert result.paths == continuation.evaluation_paths
+    assert result.exercise_counts == (0, continuation.evaluation_paths)
+    assert result.fit_diagnostics == (
+        InsufficientExerciseSupportDiagnostics(
+            node=1,
+            in_the_money_paths=3,
+            required_paths=5,
+        ),
+    )

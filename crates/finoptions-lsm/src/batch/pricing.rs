@@ -52,6 +52,7 @@ pub struct BatchLsmCallRowResult {
     origin_exercised: bool,
     regression_nodes: u32,
     no_training_support_nodes: u32,
+    insufficient_exercise_support_nodes: u32,
     minimum_in_the_money_training_paths: u32,
     maximum_regression_condition_number: f64,
     early_exercise_paths: u32,
@@ -99,6 +100,12 @@ impl BatchLsmCallRowResult {
     #[must_use]
     pub const fn no_training_support_nodes(self) -> u32 {
         self.no_training_support_nodes
+    }
+
+    /// Returns nodes where the declared policy required continuation without a regression.
+    #[must_use]
+    pub const fn insufficient_exercise_support_nodes(self) -> u32 {
+        self.insufficient_exercise_support_nodes
     }
 
     /// Returns the minimum ITM fitting population, or zero when no regression was fitted.
@@ -242,9 +249,13 @@ impl<'a> BatchLsmCallInputs<'a> {
         row: usize,
     ) -> Result<BatchLsmCallRowResult, BatchLsmError> {
         let (plan, curve) = self.build_plan(method, row)?;
-        let estimator =
-            LsmCallEstimator::try_new(self.strikes[row], method.regression(), method.tie_rule())
-                .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
+        let estimator = LsmCallEstimator::try_new(
+            self.strikes[row],
+            method.regression(),
+            method.tie_rule(),
+            method.insufficient_exercise_support(),
+        )
+        .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
         let streams = method.random_streams();
         let training_stream =
             RandomStream::new(streams.training_seed(), streams.training_domain(row)?);
@@ -480,6 +491,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
                 self.strikes[row],
                 method.regression(),
                 method.tie_rule(),
+                method.insufficient_exercise_support(),
             )
             .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
             let policy = estimator
@@ -818,6 +830,7 @@ impl BatchLsmCallRowResult {
         let mut origin_exercised = false;
         let mut regression_nodes = 0_usize;
         let mut no_training_support_nodes = 0_usize;
+        let mut insufficient_exercise_support_nodes = 0_usize;
         let mut minimum_in_the_money_training_paths = u32::MAX;
         let mut maximum_regression_condition_number = 0.0_f64;
         for diagnostic in policy.diagnostics() {
@@ -828,6 +841,9 @@ impl BatchLsmCallRowResult {
                 }
                 ExerciseFitDiagnostics::NoInTheMoneyPaths => {
                     no_training_support_nodes += 1;
+                }
+                ExerciseFitDiagnostics::InsufficientExerciseSupport { .. } => {
+                    insufficient_exercise_support_nodes += 1;
                 }
                 ExerciseFitDiagnostics::Regression {
                     in_the_money_paths,
@@ -890,6 +906,11 @@ impl BatchLsmCallRowResult {
                     row,
                 }
             })?,
+            insufficient_exercise_support_nodes: u32::try_from(insufficient_exercise_support_nodes)
+                .map_err(|_| BatchLsmError::DiagnosticOverflow {
+                    field: "insufficient_exercise_support_nodes",
+                    row,
+                })?,
             minimum_in_the_money_training_paths,
             maximum_regression_condition_number,
             early_exercise_paths: u32::try_from(early_exercise_total).map_err(|_| {
@@ -908,7 +929,10 @@ mod tests {
     use finoptions_batch::{MaturityBoundary, RaggedCashDividends};
 
     use super::*;
-    use crate::{ExerciseTieRule, PolynomialDegree, PolynomialRegressionSpec};
+    use crate::{
+        ExerciseTieRule, InsufficientExerciseSupportPolicy, PolynomialDegree,
+        PolynomialRegressionSpec,
+    };
 
     fn regression() -> PolynomialRegressionSpec {
         PolynomialRegressionSpec::try_new(PolynomialDegree::try_new(4).unwrap(), 1.0e-12, 1.0e8)
@@ -922,6 +946,7 @@ mod tests {
             2_048,
             regression(),
             ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
             super::super::BatchRandomStreams::new(7, 11, 0, 10_000),
         )
         .unwrap()
@@ -1287,6 +1312,7 @@ mod tests {
             2,
             light_regression,
             ExerciseTieRule::StrictlyGreater,
+            InsufficientExerciseSupportPolicy::Fail,
             super::super::BatchRandomStreams::new(17, 19, 0, 1_000_000),
         )
         .unwrap();
@@ -1447,6 +1473,7 @@ mod tests {
                 2,
                 regression(),
                 ExerciseTieRule::StrictlyGreater,
+                InsufficientExerciseSupportPolicy::Fail,
                 super::super::BatchRandomStreams::new(1, 2, 0, 10),
             ),
             Err(BatchLsmError::PathCountOutsideDomain {
@@ -1462,6 +1489,7 @@ mod tests {
                 1,
                 regression(),
                 ExerciseTieRule::StrictlyGreater,
+                InsufficientExerciseSupportPolicy::Fail,
                 super::super::BatchRandomStreams::new(1, 2, 0, 10),
             ),
             Err(BatchLsmError::InsufficientEvaluationPaths { observed: 1 })
@@ -1542,6 +1570,7 @@ mod tests {
             base.evaluation_paths(),
             base.regression(),
             base.tie_rule(),
+            base.insufficient_exercise_support(),
             super::super::BatchRandomStreams::new(7, 11, u32::MAX, 10_000),
         )
         .unwrap();
@@ -1560,6 +1589,7 @@ mod tests {
             base.evaluation_paths(),
             base.regression(),
             base.tie_rule(),
+            base.insufficient_exercise_support(),
             super::super::BatchRandomStreams::new(7, 11, 100, 101),
         )
         .unwrap();
@@ -1665,6 +1695,7 @@ mod tests {
             strikes[0],
             batch_method.regression(),
             batch_method.tie_rule(),
+            batch_method.insufficient_exercise_support(),
         )
         .unwrap()
         .price_seeded_serial(
@@ -1738,6 +1769,7 @@ mod tests {
             strikes[0],
             batch_method.regression(),
             batch_method.tie_rule(),
+            batch_method.insufficient_exercise_support(),
         )
         .unwrap()
         .price_seeded_serial(
@@ -1810,6 +1842,7 @@ mod tests {
             strikes[0],
             batch_method.regression(),
             batch_method.tie_rule(),
+            batch_method.insufficient_exercise_support(),
         )
         .unwrap()
         .price_escrowed_seeded_serial(
@@ -1993,6 +2026,7 @@ mod tests {
             base.evaluation_paths(),
             base.regression(),
             base.tie_rule(),
+            base.insufficient_exercise_support(),
             super::super::BatchRandomStreams::new(7, 11, 1, 10_001),
         )
         .unwrap();

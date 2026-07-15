@@ -18,6 +18,7 @@ use finoptions_lsm::{
     EscrowedVolatilityConvention as CoreEscrowedVolatilityConvention,
     ExerciseFitDiagnostics as CoreExerciseFitDiagnostics, ExerciseTieRule as CoreExerciseTieRule,
     GroupedBatchLsmCallInputs as CoreGroupedBatchLsmCallInputs,
+    InsufficientExerciseSupportPolicy as CoreInsufficientExerciseSupportPolicy,
     LsmCallEstimator as CoreLsmCallEstimator, LsmError as CoreLsmError, LsmRun as CoreLsmRun,
     OriginExercise as CoreOriginExercise, PolynomialDegree as CorePolynomialDegree,
     PolynomialRegressionSpec as CorePolynomialRegressionSpec,
@@ -313,6 +314,18 @@ fn parse_exercise_tie_rule(value: &str) -> PyResult<CoreExerciseTieRule> {
         "greater_or_equal" => Ok(CoreExerciseTieRule::GreaterOrEqual),
         observed => Err(InputError::new_err(format!(
             "unsupported exercise tie rule {observed:?}"
+        ))),
+    }
+}
+
+fn parse_insufficient_exercise_support(
+    value: &str,
+) -> PyResult<CoreInsufficientExerciseSupportPolicy> {
+    match value {
+        "fail" => Ok(CoreInsufficientExerciseSupportPolicy::Fail),
+        "continue" => Ok(CoreInsufficientExerciseSupportPolicy::Continue),
+        observed => Err(InputError::new_err(format!(
+            "unsupported insufficient exercise support policy {observed:?}"
         ))),
     }
 }
@@ -725,6 +738,22 @@ fn native_lsm_result(run: CoreLsmRun) -> NativeLsmResult {
                 None,
                 None,
             ),
+            CoreExerciseFitDiagnostics::InsufficientExerciseSupport {
+                in_the_money_paths,
+                required_paths,
+            } => (
+                diagnostic.node().get(),
+                "insufficient_exercise_support",
+                None,
+                None,
+                Some(in_the_money_paths),
+                None,
+                Some(required_paths as usize),
+                None,
+                None,
+                None,
+                None,
+            ),
             CoreExerciseFitDiagnostics::Regression {
                 in_the_money_paths,
                 diagnostics,
@@ -786,6 +815,7 @@ fn price_lsm_call_seeded_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeLsmResult> {
     let (plan, curve) = parse_gbm_model(
         schedule_times,
@@ -805,8 +835,13 @@ fn price_lsm_call_seeded_f64<'py>(
     let regression = CorePolynomialRegressionSpec::try_new(degree, rank_tolerance, condition_limit)
         .map_err(|error| LsmError::new_err(error.to_string()))?;
     let tie_rule = parse_exercise_tie_rule(tie_rule)?;
-    let estimator = CoreLsmCallEstimator::try_new(strike, regression, tie_rule)
-        .map_err(CoreLsmError::into_py_lsm_error)?;
+    let estimator = CoreLsmCallEstimator::try_new(
+        strike,
+        regression,
+        tie_rule,
+        parse_insufficient_exercise_support(insufficient_exercise_support)?,
+    )
+    .map_err(CoreLsmError::into_py_lsm_error)?;
     let training_stream = CoreRandomStream::new(training_seed, training_domain);
     let evaluation_stream = CoreRandomStream::new(evaluation_seed, evaluation_domain);
     let core_executor = &executor.inner;
@@ -899,6 +934,7 @@ fn parse_batch_lsm_method(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<CoreBatchLsmCallMethod> {
     let mesh =
         CoreUniformExerciseMesh::try_new(base_intervals, parse_origin_exercise(origin_exercise)?)
@@ -913,6 +949,7 @@ fn parse_batch_lsm_method(
         evaluation_paths,
         regression,
         parse_exercise_tie_rule(tie_rule)?,
+        parse_insufficient_exercise_support(insufficient_exercise_support)?,
         CoreBatchRandomStreams::new(
             training_seed,
             evaluation_seed,
@@ -929,6 +966,7 @@ type NativeBatchLsmResult<'py> = (
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<bool>>,
     Bound<'py, PyArray1<bool>>,
+    Bound<'py, PyArray1<u32>>,
     Bound<'py, PyArray1<u32>>,
     Bound<'py, PyArray1<u32>>,
     Bound<'py, PyArray1<u32>>,
@@ -958,6 +996,7 @@ fn native_batch_lsm_result(
     let mut origin_exercised = Vec::new();
     let mut regression_nodes = Vec::new();
     let mut no_training_support_nodes = Vec::new();
+    let mut insufficient_exercise_support_nodes = Vec::new();
     let mut minimum_in_the_money_training_paths = Vec::new();
     let mut maximum_regression_condition_numbers = Vec::new();
     let mut early_exercise_paths = Vec::new();
@@ -982,6 +1021,11 @@ fn native_batch_lsm_result(
         "no_training_support_nodes",
     )?;
     reserve_batch_output(
+        &mut insufficient_exercise_support_nodes,
+        rows,
+        "insufficient_exercise_support_nodes",
+    )?;
+    reserve_batch_output(
         &mut minimum_in_the_money_training_paths,
         rows,
         "minimum_in_the_money_training_paths",
@@ -1002,6 +1046,7 @@ fn native_batch_lsm_result(
         origin_exercised.push(row.origin_exercised());
         regression_nodes.push(row.regression_nodes());
         no_training_support_nodes.push(row.no_training_support_nodes());
+        insufficient_exercise_support_nodes.push(row.insufficient_exercise_support_nodes());
         minimum_in_the_money_training_paths.push(row.minimum_in_the_money_training_paths());
         maximum_regression_condition_numbers.push(row.maximum_regression_condition_number());
         early_exercise_paths.push(row.early_exercise_paths());
@@ -1016,6 +1061,7 @@ fn native_batch_lsm_result(
         origin_exercised.into_pyarray(py),
         regression_nodes.into_pyarray(py),
         no_training_support_nodes.into_pyarray(py),
+        insufficient_exercise_support_nodes.into_pyarray(py),
         minimum_in_the_money_training_paths.into_pyarray(py),
         maximum_regression_condition_numbers.into_pyarray(py),
         early_exercise_paths.into_pyarray(py),
@@ -1046,6 +1092,7 @@ fn price_lsm_call_batch_continuous_yield_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeBatchColumns {
         initial_spots: initial_spots.as_slice()?,
@@ -1069,6 +1116,7 @@ fn price_lsm_call_batch_continuous_yield_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py
@@ -1112,6 +1160,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeBatchColumns {
         initial_spots: initial_spots.as_slice()?,
@@ -1139,6 +1188,7 @@ fn price_lsm_call_batch_cash_dividends_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
@@ -1191,6 +1241,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeBatchColumns {
         initial_spots: initial_spots.as_slice()?,
@@ -1218,6 +1269,7 @@ fn price_lsm_call_batch_escrowed_cash_dividends_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
@@ -1267,6 +1319,7 @@ fn price_lsm_call_grouped_batch_continuous_yield_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeGroupedBatchColumns {
         group_offsets: group_offsets.as_slice()?,
@@ -1291,6 +1344,7 @@ fn price_lsm_call_grouped_batch_continuous_yield_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py
@@ -1335,6 +1389,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeGroupedBatchColumns {
         group_offsets: group_offsets.as_slice()?,
@@ -1363,6 +1418,7 @@ fn price_lsm_call_grouped_batch_cash_dividends_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
@@ -1416,6 +1472,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
     rank_tolerance: f64,
     condition_limit: f64,
     tie_rule: &str,
+    insufficient_exercise_support: &str,
 ) -> PyResult<NativeBatchLsmResult<'py>> {
     let columns = NativeGroupedBatchColumns {
         group_offsets: group_offsets.as_slice()?,
@@ -1444,6 +1501,7 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
         rank_tolerance,
         condition_limit,
         tie_rule,
+        insufficient_exercise_support,
     )?;
     let core_executor = &executor.inner;
     let result = py.detach(move || -> PyResult<CoreBatchLsmCallResult> {
