@@ -12,6 +12,7 @@ use finoptions_sim::{
 };
 use rayon::prelude::*;
 
+use crate::policy::LsmFitWorkspace;
 use crate::{
     ExerciseFitDiagnostics, FittedLsmCallPolicy, LsmCallEstimator, LsmError, LsmEvaluation, LsmRun,
     RegressionDiagnostics,
@@ -543,6 +544,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
         policies
             .try_reserve_exact(range.len())
             .map_err(|_| BatchLsmError::ResultAllocationFailed { rows: range.len() })?;
+        let mut fit_workspace = LsmFitWorkspace::new(method.regression());
         for local_row in 0..range.len() {
             let row = first_row + local_row;
             let estimator = LsmCallEstimator::try_new(
@@ -553,7 +555,13 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
             )
             .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
             let policy = estimator
-                .fit_with_math_backend(&training, &curve, self.initial_spots[group], math_backend)
+                .fit_with_math_backend_and_workspace(
+                    &training,
+                    &curve,
+                    self.initial_spots[group],
+                    math_backend,
+                    &mut fit_workspace,
+                )
                 .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
             policies.push(policy);
         }

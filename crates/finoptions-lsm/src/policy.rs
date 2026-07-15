@@ -108,6 +108,25 @@ pub struct LsmCallEstimator {
     insufficient_exercise_support: InsufficientExerciseSupportPolicy,
 }
 
+#[derive(Debug)]
+pub(crate) struct LsmFitWorkspace {
+    regression: PolynomialRegressionSpec,
+    values: Vec<f64>,
+    regression_workspace: RegressionWorkspace,
+    candidate_population: RegressionPopulation,
+}
+
+impl LsmFitWorkspace {
+    pub(crate) fn new(regression: PolynomialRegressionSpec) -> Self {
+        Self {
+            regression,
+            values: Vec::new(),
+            regression_workspace: RegressionWorkspace::default(),
+            candidate_population: RegressionPopulation::new(regression),
+        }
+    }
+}
+
 impl LsmCallEstimator {
     /// Validates an independently evaluated call-option LSM specification.
     ///
@@ -183,6 +202,25 @@ impl LsmCallEstimator {
         initial_spot: f64,
         math_backend: CpuMathBackend,
     ) -> Result<FittedLsmCallPolicy, LsmError> {
+        let mut workspace = LsmFitWorkspace::new(self.regression);
+        self.fit_with_math_backend_and_workspace(
+            training,
+            curve,
+            initial_spot,
+            math_backend,
+            &mut workspace,
+        )
+    }
+
+    pub(crate) fn fit_with_math_backend_and_workspace(
+        self,
+        training: &SimulatedPaths,
+        curve: &LogDiscountCurve,
+        initial_spot: f64,
+        math_backend: CpuMathBackend,
+        workspace: &mut LsmFitWorkspace,
+    ) -> Result<FittedLsmCallPolicy, LsmError> {
+        debug_assert_eq!(workspace.regression, self.regression);
         validate_initial_spot(initial_spot)?;
         validate_curve(training, curve)?;
         let training_count = path_count("training", training)?;
@@ -191,12 +229,12 @@ impl LsmCallEstimator {
         let nodes = training.observation_nodes();
         let exercise_rows = nodes.len() - 1;
         let terminal = row(training, exercise_rows);
-        let mut values = terminal
-            .iter()
-            .map(|&spot| call_intrinsic(spot, self.strike))
-            .collect::<Vec<_>>();
-        let mut regression_workspace = RegressionWorkspace::default();
-        let mut candidate_population = RegressionPopulation::new(self.regression);
+        workspace.values.clear();
+        workspace.values.extend(
+            terminal
+                .iter()
+                .map(|&spot| call_intrinsic(spot, self.strike)),
+        );
         let mut reversed_rules = Vec::with_capacity(exercise_rows);
         let mut reversed_diagnostics = Vec::with_capacity(exercise_rows);
         let mut later_node = nodes[exercise_rows];
@@ -206,15 +244,15 @@ impl LsmCallEstimator {
             if node.get() == 0 {
                 continue;
             }
-            discount_values(&mut values, curve, node, later_node)?;
+            discount_values(&mut workspace.values, curve, node, later_node)?;
             let spots = row(training, exercise_row);
             let (rule, diagnostic) = self.fit_positive_time_rule(
                 node,
                 spots,
-                &mut values,
+                &mut workspace.values,
                 training_count,
-                &mut candidate_population,
-                &mut regression_workspace,
+                &mut workspace.candidate_population,
+                &mut workspace.regression_workspace,
                 math_backend,
             )?;
             reversed_rules.push(rule);
@@ -225,9 +263,9 @@ impl LsmCallEstimator {
             later_node = node;
         }
 
-        discount_values_to_origin(&mut values, curve, later_node)?;
+        discount_values_to_origin(&mut workspace.values, curve, later_node)?;
         if nodes.first().is_some_and(|node| node.get() == 0) {
-            let estimated_continuation = online_mean(&values, training_count)?;
+            let estimated_continuation = online_mean(&workspace.values, training_count)?;
             let intrinsic = call_intrinsic(initial_spot, self.strike);
             let exercise = self
                 .tie_rule
@@ -1151,6 +1189,72 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "actual={actual:?}, expected={expected:?}, tolerance={tolerance:?}"
         );
+    }
+
+    #[test]
+    fn reusable_fit_workspace_is_bitwise_identical_and_clears_between_strikes() {
+        let (plan, curve) = plan(
+            &[0.0, 0.25, 0.5, 0.75, 1.0],
+            &[0.0, -0.01, -0.02, -0.03, -0.04],
+            Some((2, 2.0)),
+            &[1, 2, 3],
+        );
+        let executor = CpuExecutor::try_new(1).unwrap();
+        let training = plan
+            .simulate_seeded_with(&executor, 100.0, 1_024, RandomStream::new(7, 11))
+            .unwrap();
+        let base = estimator();
+        let left = LsmCallEstimator::try_new(
+            95.0,
+            base.regression,
+            base.tie_rule,
+            base.insufficient_exercise_support,
+        )
+        .unwrap();
+        let right = LsmCallEstimator::try_new(
+            105.0,
+            base.regression,
+            base.tie_rule,
+            base.insufficient_exercise_support,
+        )
+        .unwrap();
+        let fresh_left = left
+            .fit_with_math_backend(&training, &curve, 100.0, CpuMathBackend::RustStdF64)
+            .unwrap();
+        let fresh_right = right
+            .fit_with_math_backend(&training, &curve, 100.0, CpuMathBackend::RustStdF64)
+            .unwrap();
+        let mut workspace = LsmFitWorkspace::new(base.regression);
+        let reused_left = left
+            .fit_with_math_backend_and_workspace(
+                &training,
+                &curve,
+                100.0,
+                CpuMathBackend::RustStdF64,
+                &mut workspace,
+            )
+            .unwrap();
+        let reused_right = right
+            .fit_with_math_backend_and_workspace(
+                &training,
+                &curve,
+                100.0,
+                CpuMathBackend::RustStdF64,
+                &mut workspace,
+            )
+            .unwrap();
+        let reused_left_again = left
+            .fit_with_math_backend_and_workspace(
+                &training,
+                &curve,
+                100.0,
+                CpuMathBackend::RustStdF64,
+                &mut workspace,
+            )
+            .unwrap();
+        assert_eq!(fresh_left, reused_left);
+        assert_eq!(fresh_right, reused_right);
+        assert_eq!(fresh_left, reused_left_again);
     }
 
     #[test]

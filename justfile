@@ -26,5 +26,8 @@ test: native
 bench-bootstrap threads="10": native
     uv run --no-sync python benchmarks/stationary_bootstrap.py --threads {{threads}} --mean-block-length 5 --mean-block-length 10 --mean-block-length 20 --mean-block-length 40 --mean-block-length 60
 
+bench-grouped-lsm threads="14" paths="32768" math_backend="rust_std_f64": native
+    uv run --no-sync python benchmarks/grouped_lsm_large_paths.py --threads {{threads}} --paths {{paths}} --math-backend {{math_backend}}
+
 full: check test
     uv build
