@@ -94,6 +94,19 @@ def test_obstacle_projection_limit_is_explicit_and_fail_fast() -> None:
         )
 
 
+def test_negative_method_count_is_a_typed_public_input_error() -> None:
+    """PyO3 unsigned conversion must not escape the public typed error boundary."""
+    with pytest.raises(InputError, match="nonnegative platform-representable integers"):
+        AndersenLake(
+            boundary_quadrature_order=-1,
+            iterations=32,
+            collocation_nodes=10,
+            price_quadrature_order=41,
+            maximum_relative_boundary_residual=MAXIMUM_RESIDUAL,
+            maximum_relative_obstacle_projection=MAXIMUM_OBSTACLE_PROJECTION,
+        )
+
+
 def test_zero_yield_nonnegative_rate_uses_exact_european_identity() -> None:
     """The theorem route must be explicit in group diagnostics."""
     result = price_andersen_lake_call_grouped(

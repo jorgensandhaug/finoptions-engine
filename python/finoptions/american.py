@@ -58,18 +58,19 @@ class AndersenLake:
                 f"{type(self.maximum_relative_obstacle_projection).__name__}"
             )
             raise InputError(msg)
-        object.__setattr__(
-            self,
-            "_handle",
-            _native.AndersenLake(
+        try:
+            handle = _native.AndersenLake(
                 self.boundary_quadrature_order,
                 self.iterations,
                 self.collocation_nodes,
                 self.price_quadrature_order,
                 self.maximum_relative_boundary_residual,
                 self.maximum_relative_obstacle_projection,
-            ),
-        )
+            )
+        except OverflowError as error:
+            msg = "Andersen-Lake counts must be nonnegative platform-representable integers"
+            raise InputError(msg) from error
+        object.__setattr__(self, "_handle", handle)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
