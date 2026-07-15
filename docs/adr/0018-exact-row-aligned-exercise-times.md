@@ -53,3 +53,7 @@ schedule buffers and rerun their frozen numerical pilot before adopting the comp
   opportunity sets.
 - Invalid duplicates, order, positivity, maturity, row count, dtype, and layout fail without
   sorting, casting, broadcasting, or partial output.
+- On the Apple M4 Pro publication-shaped benchmark, the generic explicit schedule is within the
+  overlapping 95% confidence intervals of the theorem-specialized cash-date schedule at both one
+  and eight workers. See
+  [`2026-07-15-exact-exercise-times.md`](../performance/2026-07-15-exact-exercise-times.md).
