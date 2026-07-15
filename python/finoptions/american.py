@@ -14,6 +14,9 @@ from .simulation import CpuExecutor
 
 AmericanOptionError = _native.AmericanOptionError
 
+Float64Vector = npt.NDArray[np.float64]
+BoolVector = npt.NDArray[np.bool_]
+
 
 @dataclass(frozen=True, slots=True)
 class AndersenLake:
@@ -69,15 +72,57 @@ class AndersenLake:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class AndersenLakeBatchResult:
     """Contract prices and one deterministic convergence record per natural group."""
 
-    prices: npt.NDArray[np.float64]
-    exercised_at_origin: npt.NDArray[np.bool_]
-    maximum_relative_boundary_residuals: npt.NDArray[np.float64]
-    maximum_relative_obstacle_projections: npt.NDArray[np.float64]
-    used_european_identity: npt.NDArray[np.bool_]
+    prices: Float64Vector
+    exercised_at_origin: BoolVector
+    maximum_relative_boundary_residuals: Float64Vector
+    maximum_relative_obstacle_projections: Float64Vector
+    used_european_identity: BoolVector
+
+    def __post_init__(self) -> None:
+        """Require immutable, shape-aligned native result vectors."""
+        rows = int(self.prices.size)
+        groups = int(self.maximum_relative_boundary_residuals.size)
+        for name, values, dtype, size in (
+            ("prices", self.prices, np.dtype(np.float64), rows),
+            ("exercised_at_origin", self.exercised_at_origin, np.dtype(np.bool_), rows),
+            (
+                "maximum_relative_boundary_residuals",
+                self.maximum_relative_boundary_residuals,
+                np.dtype(np.float64),
+                groups,
+            ),
+            (
+                "maximum_relative_obstacle_projections",
+                self.maximum_relative_obstacle_projections,
+                np.dtype(np.float64),
+                groups,
+            ),
+            ("used_european_identity", self.used_european_identity, np.dtype(np.bool_), groups),
+        ):
+            _require_vector(name, values, dtype)
+            if values.size != size:
+                msg = f"{name} has {values.size} values; expected {size}"
+                raise InputError(msg)
+            if values.flags.writeable:
+                msg = f"{name} must be immutable"
+                raise InputError(msg)
+        if rows == 0 or groups == 0:
+            msg = "Andersen-Lake results require at least one group and one price"
+            raise InputError(msg)
+
+    @property
+    def rows(self) -> int:
+        """Return the priced contract count."""
+        return int(self.prices.size)
+
+    @property
+    def groups(self) -> int:
+        """Return the solved or theorem-routed natural state count."""
+        return int(self.maximum_relative_boundary_residuals.size)
 
 
 def _require_vector[Scalar: np.generic](
@@ -167,6 +212,14 @@ def price_andersen_lake_call_grouped(  # noqa: PLR0913 - columns stay explicit a
             method._handle,  # noqa: SLF001 - wrapper owns the private native resource
         )
     )
+    for values in (
+        prices,
+        exercised_at_origin,
+        residuals,
+        obstacle_projections,
+        european_identities,
+    ):
+        values.flags.writeable = False
     return AndersenLakeBatchResult(
         prices=prices,
         exercised_at_origin=exercised_at_origin,

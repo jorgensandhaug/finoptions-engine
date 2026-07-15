@@ -52,6 +52,16 @@ def test_published_put_benchmark_is_reproduced_through_call_put_symmetry() -> No
     assert result.maximum_relative_obstacle_projections[0] <= MAXIMUM_OBSTACLE_PROJECTION
     assert not result.used_european_identity[0]
     assert result.exercised_at_origin.tolist() == [False, False, False]
+    assert result.rows == result.prices.size
+    assert result.groups == result.used_european_identity.size
+    for values in (
+        result.prices,
+        result.exercised_at_origin,
+        result.maximum_relative_boundary_residuals,
+        result.maximum_relative_obstacle_projections,
+        result.used_european_identity,
+    ):
+        assert not values.flags.writeable
 
 
 def test_solved_exercise_region_returns_exact_intrinsic_without_clamping() -> None:
