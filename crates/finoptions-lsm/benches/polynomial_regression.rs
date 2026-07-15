@@ -1,6 +1,9 @@
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{
+    BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+    measurement::WallTime,
+};
 use finoptions_lsm::{
     PolynomialDegree, PolynomialRegressionSpec, RegressionBenchmark, RegressionPredictionBenchmark,
 };
@@ -28,6 +31,48 @@ fn population(observations: usize) -> (Vec<f64>, Vec<f64>) {
     (predictors, responses)
 }
 
+fn benchmark_backend(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    observations: usize,
+    predictors: &[f64],
+    responses: &[f64],
+    spec: PolynomialRegressionSpec,
+    backend_name: &str,
+    backend: CpuMathBackend,
+) {
+    let mut production = RegressionBenchmark::new_with_math_backend(spec, backend);
+    group.bench_with_input(
+        BenchmarkId::new(format!("empirical_orthogonal_{backend_name}"), observations),
+        &observations,
+        |bencher, _| {
+            bencher.iter(|| {
+                black_box(
+                    production
+                        .fit(black_box(predictors), black_box(responses))
+                        .unwrap(),
+                );
+            });
+        },
+    );
+    let mut summarized = RegressionBenchmark::new_with_math_backend(spec, backend);
+    group.bench_with_input(
+        BenchmarkId::new(
+            format!("summarized_population_{backend_name}"),
+            observations,
+        ),
+        &observations,
+        |bencher, _| {
+            bencher.iter(|| {
+                black_box(
+                    summarized
+                        .fit_with_summarized_population(black_box(predictors), black_box(responses))
+                        .unwrap(),
+                );
+            });
+        },
+    );
+}
+
 fn benchmark(c: &mut Criterion) {
     let spec =
         PolynomialRegressionSpec::try_new(PolynomialDegree::try_new(4).unwrap(), 1.0e-12, 1.0e8)
@@ -37,40 +82,26 @@ fn benchmark(c: &mut Criterion) {
     for observations in [500, 65_536] {
         let (predictors, responses) = population(observations);
         let observation_count = u32::try_from(observations).unwrap();
-        let mut production = RegressionBenchmark::new(spec);
         group.throughput(Throughput::Elements(u64::from(observation_count)));
-        group.bench_with_input(
-            BenchmarkId::new("empirical_orthogonal_rust_std_f64", observations),
-            &observations,
-            |bencher, _| {
-                bencher.iter(|| {
-                    black_box(
-                        production
-                            .fit(black_box(&predictors), black_box(&responses))
-                            .unwrap(),
-                    );
-                });
-            },
+        benchmark_backend(
+            &mut group,
+            observations,
+            &predictors,
+            &responses,
+            spec,
+            "rust_std_f64",
+            CpuMathBackend::RustStdF64,
         );
-
         #[cfg(target_os = "macos")]
-        {
-            let mut accelerated =
-                RegressionBenchmark::new_with_math_backend(spec, CpuMathBackend::AppleAccelerate);
-            group.bench_with_input(
-                BenchmarkId::new("empirical_orthogonal_apple_accelerate", observations),
-                &observations,
-                |bencher, _| {
-                    bencher.iter(|| {
-                        black_box(
-                            accelerated
-                                .fit(black_box(&predictors), black_box(&responses))
-                                .unwrap(),
-                        );
-                    });
-                },
-            );
-        }
+        benchmark_backend(
+            &mut group,
+            observations,
+            &predictors,
+            &responses,
+            spec,
+            "apple_accelerate",
+            CpuMathBackend::AppleAccelerate,
+        );
 
         let mean = predictors.iter().sum::<f64>() / f64::from(observation_count);
         let scale = (predictors

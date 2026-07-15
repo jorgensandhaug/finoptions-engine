@@ -232,6 +232,82 @@ impl PolynomialModel {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct RegressionPopulation {
+    spec: PolynomialRegressionSpec,
+    predictors: Vec<f64>,
+    responses: Vec<f64>,
+    count: f64,
+    predictor_mean: f64,
+    predictor_m2: f64,
+    first_non_finite_predictor: Option<(usize, f64)>,
+    first_non_finite_response: Option<(usize, f64)>,
+}
+
+impl RegressionPopulation {
+    pub(crate) fn new(spec: PolynomialRegressionSpec) -> Self {
+        Self {
+            spec,
+            predictors: Vec::new(),
+            responses: Vec::new(),
+            count: 0.0,
+            predictor_mean: 0.0,
+            predictor_m2: 0.0,
+            first_non_finite_predictor: None,
+            first_non_finite_response: None,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.predictors.clear();
+        self.responses.clear();
+        self.count = 0.0;
+        self.predictor_mean = 0.0;
+        self.predictor_m2 = 0.0;
+        self.first_non_finite_predictor = None;
+        self.first_non_finite_response = None;
+    }
+
+    pub(crate) fn push(&mut self, predictor: f64, response: f64) {
+        let index = self.predictors.len();
+        self.predictors.push(predictor);
+        self.responses.push(response);
+        if !predictor.is_finite() {
+            self.first_non_finite_predictor
+                .get_or_insert((index, predictor));
+        } else if self.spec.degree.get() != 0 {
+            self.count += 1.0;
+            let delta = predictor - self.predictor_mean;
+            self.predictor_mean += delta / self.count;
+            self.predictor_m2 = delta.mul_add(predictor - self.predictor_mean, self.predictor_m2);
+        }
+        if !response.is_finite() {
+            self.first_non_finite_response
+                .get_or_insert((index, response));
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.predictors.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.predictors.len()
+    }
+
+    fn location_scale(&self) -> Result<(f64, f64), RegressionError> {
+        let degree = self.spec.degree.get();
+        if degree == 0 {
+            return Ok((0.0, 1.0));
+        }
+        let scale = (self.predictor_m2 / self.count).sqrt();
+        if !self.predictor_mean.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return Err(RegressionError::DegeneratePredictor { degree, scale });
+        }
+        Ok((self.predictor_mean, scale))
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct RegressionWorkspace {
     standardized: Vec<f64>,
@@ -251,6 +327,7 @@ impl RegressionWorkspace {
         self.fit_with_math_backend(predictors, responses, spec, CpuMathBackend::RustStdF64)
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn fit_with_math_backend(
         &mut self,
         predictors: &[f64],
@@ -259,10 +336,50 @@ impl RegressionWorkspace {
         math_backend: CpuMathBackend,
     ) -> Result<PolynomialModel, RegressionError> {
         let observation_count = validate_columns(predictors, responses, spec)?;
-
-        let observations = predictors.len();
         let degree = spec.degree.get();
         let (predictor_mean, predictor_scale) = predictor_location_scale(predictors, degree)?;
+        self.fit_validated(
+            predictors,
+            responses,
+            observation_count,
+            predictor_mean,
+            predictor_scale,
+            spec,
+            math_backend,
+        )
+    }
+
+    pub(crate) fn fit_population(
+        &mut self,
+        population: &RegressionPopulation,
+        math_backend: CpuMathBackend,
+    ) -> Result<PolynomialModel, RegressionError> {
+        let observation_count = validate_population(population)?;
+        let (predictor_mean, predictor_scale) = population.location_scale()?;
+        self.fit_validated(
+            &population.predictors,
+            &population.responses,
+            observation_count,
+            predictor_mean,
+            predictor_scale,
+            population.spec,
+            math_backend,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fit_validated(
+        &mut self,
+        predictors: &[f64],
+        responses: &[f64],
+        observation_count: u32,
+        predictor_mean: f64,
+        predictor_scale: f64,
+        spec: PolynomialRegressionSpec,
+        math_backend: CpuMathBackend,
+    ) -> Result<PolynomialModel, RegressionError> {
+        let observations = predictors.len();
+        let degree = spec.degree.get();
         self.prepare(observations);
         for (standardized, &predictor) in self.standardized.iter_mut().zip(predictors) {
             *standardized = if degree == 0 {
@@ -438,7 +555,46 @@ fn diagnose_design(
     Ok((rank, condition_number))
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 fn validate_columns(
+    predictors: &[f64],
+    responses: &[f64],
+    spec: PolynomialRegressionSpec,
+) -> Result<u32, RegressionError> {
+    let observations = validate_population_dimensions(predictors, responses, spec)?;
+    if let Some((index, &observed)) = predictors
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(RegressionError::NonFinitePredictor { index, observed });
+    }
+    if let Some((index, &observed)) = responses
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(RegressionError::NonFiniteResponse { index, observed });
+    }
+    Ok(observations)
+}
+
+fn validate_population(population: &RegressionPopulation) -> Result<u32, RegressionError> {
+    let observations = validate_population_dimensions(
+        &population.predictors,
+        &population.responses,
+        population.spec,
+    )?;
+    if let Some((index, observed)) = population.first_non_finite_predictor {
+        return Err(RegressionError::NonFinitePredictor { index, observed });
+    }
+    if let Some((index, observed)) = population.first_non_finite_response {
+        return Err(RegressionError::NonFiniteResponse { index, observed });
+    }
+    Ok(observations)
+}
+
+fn validate_population_dimensions(
     predictors: &[f64],
     responses: &[f64],
     spec: PolynomialRegressionSpec,
@@ -462,23 +618,10 @@ fn validate_columns(
             observed: predictors.len(),
             maximum: u32::MAX,
         })?;
-    if let Some((index, &observed)) = predictors
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
-    {
-        return Err(RegressionError::NonFinitePredictor { index, observed });
-    }
-    if let Some((index, &observed)) = responses
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
-    {
-        return Err(RegressionError::NonFiniteResponse { index, observed });
-    }
     Ok(observations)
 }
 
+#[cfg(any(test, feature = "bench-internals"))]
 fn predictor_location_scale(
     predictors: &[f64],
     degree: usize,
@@ -670,16 +813,6 @@ pub struct RegressionBenchmark {
 
 #[cfg(feature = "bench-internals")]
 impl RegressionBenchmark {
-    /// Creates a benchmark wrapper around an already validated estimator specification.
-    #[must_use]
-    pub fn new(spec: PolynomialRegressionSpec) -> Self {
-        Self {
-            workspace: RegressionWorkspace::default(),
-            spec,
-            math_backend: CpuMathBackend::RustStdF64,
-        }
-    }
-
     /// Creates a benchmark wrapper using one explicit CPU numerical implementation.
     #[must_use]
     pub fn new_with_math_backend(
@@ -709,6 +842,32 @@ impl RegressionBenchmark {
             self.spec,
             self.math_backend,
         )?;
+        Ok((model.diagnostics(), model.predict(predictors[0])?))
+    }
+
+    /// Accumulates the production population summary and fits without rescanning finite values.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the production fail-fast regression contract.
+    pub fn fit_with_summarized_population(
+        &mut self,
+        predictors: &[f64],
+        responses: &[f64],
+    ) -> Result<(RegressionDiagnostics, f64), RegressionError> {
+        if predictors.len() != responses.len() {
+            return Err(RegressionError::LengthMismatch {
+                predictors: predictors.len(),
+                responses: responses.len(),
+            });
+        }
+        let mut population = RegressionPopulation::new(self.spec);
+        for (&predictor, &response) in predictors.iter().zip(responses) {
+            population.push(predictor, response);
+        }
+        let model = self
+            .workspace
+            .fit_population(&population, self.math_backend)?;
         Ok((model.diagnostics(), model.predict(predictors[0])?))
     }
 }
@@ -798,6 +957,18 @@ mod tests {
         (predictors, responses)
     }
 
+    fn summarized_population(
+        predictors: &[f64],
+        responses: &[f64],
+        spec: PolynomialRegressionSpec,
+    ) -> RegressionPopulation {
+        let mut population = RegressionPopulation::new(spec);
+        for (&predictor, &response) in predictors.iter().zip(responses) {
+            population.push(predictor, response);
+        }
+        population
+    }
+
     fn svd_oracle(
         predictors: &[f64],
         responses: &[f64],
@@ -835,6 +1006,73 @@ mod tests {
             4 => model.predict_for::<4>(predictor),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn summarized_population_is_bitwise_equal_to_full_validation_for_every_degree_and_backend() {
+        let (predictors, responses) = representative_population(500);
+        let mut backends = vec![CpuMathBackend::RustStdF64];
+        #[cfg(target_os = "macos")]
+        backends.push(CpuMathBackend::AppleAccelerate);
+
+        for degree in 0..=MAX_POLYNOMIAL_DEGREE {
+            let spec = spec(degree, 1.0e8);
+            for &backend in &backends {
+                let expected = RegressionWorkspace::default()
+                    .fit_with_math_backend(&predictors, &responses, spec, backend)
+                    .unwrap();
+                let observed = RegressionWorkspace::default()
+                    .fit_population(
+                        &summarized_population(&predictors, &responses, spec),
+                        backend,
+                    )
+                    .unwrap();
+                assert_eq!(observed, expected, "degree={degree}, backend={backend:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn summarized_population_preserves_validation_error_precedence() {
+        fn assert_same_error(
+            predictors: &[f64],
+            responses: &[f64],
+            spec: PolynomialRegressionSpec,
+        ) {
+            let expected = RegressionWorkspace::default()
+                .fit_with_math_backend(predictors, responses, spec, CpuMathBackend::RustStdF64)
+                .unwrap_err();
+            let observed = RegressionWorkspace::default()
+                .fit_population(
+                    &summarized_population(predictors, responses, spec),
+                    CpuMathBackend::RustStdF64,
+                )
+                .unwrap_err();
+            assert_eq!(format!("{observed:?}"), format!("{expected:?}"));
+        }
+
+        assert_same_error(&[f64::NAN, 1.0], &[f64::NAN, 1.0], spec(4, 1.0e8));
+        assert_same_error(&[1.0, f64::NAN], &[f64::NAN, 1.0], spec(1, 1.0e8));
+        assert_same_error(&[1.0, 2.0], &[1.0, f64::NAN], spec(1, 1.0e8));
+        assert_same_error(&[1.0, 1.0], &[2.0, 3.0], spec(1, 1.0e8));
+    }
+
+    #[test]
+    fn summarized_population_clear_reuses_storage_without_validation_state() {
+        let spec = spec(1, 1.0e8);
+        let mut population = RegressionPopulation::new(spec);
+        population.push(f64::NAN, f64::NAN);
+        population.clear();
+        population.push(1.0, 2.0);
+        population.push(2.0, 4.0);
+
+        let observed = RegressionWorkspace::default()
+            .fit_population(&population, CpuMathBackend::RustStdF64)
+            .unwrap();
+        let expected = RegressionWorkspace::default()
+            .fit_with_math_backend(&[1.0, 2.0], &[2.0, 4.0], spec, CpuMathBackend::RustStdF64)
+            .unwrap();
+        assert_eq!(observed, expected);
     }
 
     fn independent_condition_and_rank(

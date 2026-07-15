@@ -45,6 +45,13 @@ loss, excessive condition, and Jacobi non-convergence are typed failures. There 
 degree reduction, ridge term, pseudoinverse, population expansion, tolerance change, or forced
 continuation rule.
 
+The LSM policy's reusable in-the-money population owns its predictor and response buffers together
+with the first-invalid-value state and ordered Welford location/scale summary. Accumulating that
+summary during the already required population-selection pass avoids rescanning private owned
+values. Arbitrary-slice test and benchmark entry points retain full validation. Tests require the
+owned-population and fully validating routes to produce bitwise-identical models and the same error
+precedence; the optimization removes memory passes, not checks or estimator work.
+
 ## Evidence
 
 Tests compare accepted projections and condition numbers with nalgebra 0.35.0 SVD calculations for
@@ -57,6 +64,12 @@ On an Apple M4 Pro, Criterion 0.8.2 measured the complete allocation-reusing deg
 including validation and condition diagnostics, at about `9.54 us` for 500 rows and `1.05 ms` for
 65,536 rows. The independent SVD benchmark measured about `16.11 us` and `2.40 ms`, respectively.
 These are local engineering measurements, not publication claims or permanent regression limits.
+
+At the 150-interval, 500-training/500-evaluation grouped paper workload, fusing population
+selection with validation and ordered Welford statistics reduced a stable one-thread Apple run by
+6.35%--8.13% after the type-safe ownership refactor. See the
+[fused-population checkpoint](../performance/2026-07-15-fused-regression-population.md) for the
+profile, rejected candidates, exact A/B scope, and invalidated scalar timing.
 
 ## Consequences
 

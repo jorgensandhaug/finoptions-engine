@@ -5,7 +5,7 @@ use finoptions_sim::{
     CpuExecutor, CpuMathBackend, EscrowedGbmPathPlan, GbmPathPlan, RandomStream, SimulatedPaths,
 };
 
-use crate::regression::{PolynomialModel, RegressionWorkspace};
+use crate::regression::{PolynomialModel, RegressionPopulation, RegressionWorkspace};
 use crate::{LsmError, PolynomialRegressionSpec, RegressionDiagnostics};
 
 /// Explicit rule when immediate exercise and fitted continuation compare equal.
@@ -169,8 +169,7 @@ impl LsmCallEstimator {
             .map(|&spot| call_intrinsic(spot, self.strike))
             .collect::<Vec<_>>();
         let mut regression_workspace = RegressionWorkspace::default();
-        let mut candidate_states = Vec::new();
-        let mut candidate_values = Vec::new();
+        let mut candidate_population = RegressionPopulation::new(self.regression);
         let mut reversed_rules = Vec::with_capacity(exercise_rows);
         let mut reversed_diagnostics = Vec::with_capacity(exercise_rows);
         let mut later_node = nodes[exercise_rows];
@@ -187,8 +186,7 @@ impl LsmCallEstimator {
                 spots,
                 &mut values,
                 training_count,
-                &mut candidate_states,
-                &mut candidate_values,
+                &mut candidate_population,
                 &mut regression_workspace,
                 math_backend,
             )?;
@@ -411,42 +409,35 @@ impl LsmCallEstimator {
         spots: &[f64],
         values: &mut [f64],
         training_count: u32,
-        candidate_states: &mut Vec<f64>,
-        candidate_values: &mut Vec<f64>,
+        candidate_population: &mut RegressionPopulation,
         workspace: &mut RegressionWorkspace,
         math_backend: CpuMathBackend,
     ) -> Result<(ExerciseRule, ExerciseFitDiagnostics), LsmError> {
-        candidate_states.clear();
-        candidate_values.clear();
+        candidate_population.clear();
         for (&spot, &value) in spots.iter().zip(&*values) {
             if spot > self.strike {
-                candidate_states.push(spot / self.strike);
-                candidate_values.push(value);
+                let moneyness = spot / self.strike;
+                candidate_population.push(moneyness, value);
             }
         }
-        if candidate_states.is_empty() {
+        if candidate_population.is_empty() {
             return Ok((
                 ExerciseRule::NoTrainingSupport,
                 ExerciseFitDiagnostics::NoInTheMoneyPaths,
             ));
         }
         let model = workspace
-            .fit_with_math_backend(
-                &candidate_states[..],
-                &candidate_values[..],
-                self.regression,
-                math_backend,
-            )
+            .fit_population(candidate_population, math_backend)
             .map_err(|source| LsmError::RegressionAtNode {
                 node: node.get(),
                 source,
             })?;
         let diagnostics = model.diagnostics();
         self.apply_training_rule(node, spots, values, &model)?;
-        let in_the_money_paths = u32::try_from(candidate_states.len()).map_err(|_| {
+        let in_the_money_paths = u32::try_from(candidate_population.len()).map_err(|_| {
             LsmError::PathCountOutsideDomain {
                 population: "training in-the-money",
-                observed: candidate_states.len(),
+                observed: candidate_population.len(),
                 maximum: u32::MAX,
             }
         })?;
