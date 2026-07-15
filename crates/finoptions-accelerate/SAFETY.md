@@ -12,18 +12,32 @@ The wrapper calls the macOS SDK declaration
 Requests larger than `i32::MAX` are split into equal contiguous chunks before count conversion; the
 count and both chunks remain live for each call. Empty slices make no FFI call.
 
-## vDSP polynomial reductions
+## Polynomial reductions
 
-The regression wrapper calls `vDSP_vsqD` and `vDSP_dotprD` with unit strides and the SDK's
-`vDSP_Length`/`vDSP_Stride` ABI widths (`usize`/`isize` on the supported 64-bit targets). Predictors,
-responses, basis, and squared-basis scratch must have exactly the same length. The mutable scratch
-is disjoint from all three immutable inputs; scalar results and every slice remain live for each
-call. Empty slices make no FFI call. The safe runtime boundary validates the same contract before
-choosing either scalar or Accelerate execution.
+Predictors, responses, basis, and squared-basis scratch must have exactly the same length. The safe
+public wrapper proves that contract before dispatch, and Rust's borrowing rules keep the mutable
+scratch disjoint from all three immutable inputs. Empty slices return the three zero reductions
+without entering a native kernel. The runtime validates the same contract before choosing either
+the portable or explicitly requested Apple backend.
+
+On AArch64 macOS, NEON is part of the baseline ISA. The implementation loads and stores two `f64`
+lanes only under a remaining-length proof, processes eight elements through four independent
+accumulators, then handles a two-element vector tail and at most one scalar element. Pointer
+addition is therefore bounded by the common slice length. Horizontal reduction occurs only after
+all vector loads and stores complete. The `#[target_feature(enable = "neon")]` function is called
+only from the AArch64-specific safe wrapper.
+
+On non-AArch64 macOS, the wrapper retains `vDSP_vsqD` and `vDSP_dotprD` with unit strides and the
+SDK's `vDSP_Length`/`vDSP_Stride` ABI widths (`usize`/`isize` on supported 64-bit targets). Scalar
+results and every slice remain live for each call. The benchmark also retains the former vDSP
+implementation as an explicit measured reference under the same shape and aliasing proof; it is
+not a production fallback.
 
 The module links only on macOS; other targets return a typed unavailable-platform error and never
 substitute an implementation. Numerical evidence is separate from memory safety: vForce is checked
-against Rust `f64::exp` over the declared pricing exponent domain, and vDSP reductions are checked
-against compensated large-population sums under a fixed forward-error bound. The production
-regression is independently checked against an SVD oracle. Every research run records its selected
-backend because exact bits are not promised across implementations.
+against Rust `f64::exp` over the declared pricing exponent domain. Polynomial reductions are checked
+against compensated sums at every vector-block residue around small, 500-row, and power-of-two
+boundaries, plus a 65,536-row population, under a fixed forward-error bound. Squared-basis scratch
+is checked bitwise. The production regression is independently checked against an SVD oracle.
+Every research run records its selected backend because exact bits are not promised across
+implementations.

@@ -8,7 +8,7 @@ use thiserror::Error;
 pub enum CpuMathBackend {
     /// Rust standard-library scalar `f64` operations.
     RustStdF64,
-    /// Apple Accelerate vForce and vDSP kernels. Available only on macOS.
+    /// Apple vForce plus architecture-specific vector kernels. Available only on macOS.
     AppleAccelerate,
 }
 

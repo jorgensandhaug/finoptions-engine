@@ -1,4 +1,4 @@
-//! Small audited safe wrappers around the Apple Accelerate ABI.
+//! Small audited safe wrappers around Apple platform vector math.
 
 use thiserror::Error;
 
@@ -50,6 +50,7 @@ mod ffi {
     #[link(name = "Accelerate", kind = "framework")]
     unsafe extern "C" {
         pub(super) fn vvexp(output: *mut f64, input: *const f64, count: *const i32);
+        #[cfg(not(target_arch = "aarch64"))]
         pub(super) fn vDSP_dotprD(
             first: *const f64,
             first_stride: isize,
@@ -58,6 +59,7 @@ mod ffi {
             result: *mut f64,
             count: usize,
         );
+        #[cfg(not(target_arch = "aarch64"))]
         pub(super) fn vDSP_vsqD(
             input: *const f64,
             input_stride: isize,
@@ -88,6 +90,112 @@ mod ffi {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn fused_neon_polynomial_moments_f64_impl(
+        predictors: &[f64],
+        responses: &[f64],
+        basis: &[f64],
+        squared_basis_output: &mut [f64],
+    ) -> (f64, f64, f64) {
+        use core::arch::aarch64::{
+            vaddq_f64, vaddvq_f64, vdupq_n_f64, vfmaq_f64, vld1q_f64, vmulq_f64, vst1q_f64,
+        };
+
+        debug_assert_eq!(predictors.len(), responses.len());
+        debug_assert_eq!(predictors.len(), basis.len());
+        debug_assert_eq!(predictors.len(), squared_basis_output.len());
+        let mut norm = [vdupq_n_f64(0.0); 4];
+        let mut projection = [vdupq_n_f64(0.0); 4];
+        let mut weighted_predictor = [vdupq_n_f64(0.0); 4];
+        let mut index = 0;
+        while index + 8 <= basis.len() {
+            for accumulator in 0..4 {
+                let offset = index + 2 * accumulator;
+                // SAFETY: the safe public wrapper proved all four slices have one common length.
+                // The eight-element loop bound therefore contains each two-lane load, and Rust's
+                // slice borrowing proves the mutable output cannot alias any immutable input.
+                let (predictor, response, basis_value) = unsafe {
+                    (
+                        vld1q_f64(predictors.as_ptr().add(offset)),
+                        vld1q_f64(responses.as_ptr().add(offset)),
+                        vld1q_f64(basis.as_ptr().add(offset)),
+                    )
+                };
+                let squared_basis = vmulq_f64(basis_value, basis_value);
+                // SAFETY: the same common-length proof and loop bound contain this two-lane store.
+                unsafe {
+                    vst1q_f64(squared_basis_output.as_mut_ptr().add(offset), squared_basis);
+                }
+                norm[accumulator] = vfmaq_f64(norm[accumulator], basis_value, basis_value);
+                projection[accumulator] = vfmaq_f64(projection[accumulator], response, basis_value);
+                weighted_predictor[accumulator] =
+                    vfmaq_f64(weighted_predictor[accumulator], predictor, squared_basis);
+            }
+            index += 8;
+        }
+        let mut norm = vaddq_f64(vaddq_f64(norm[0], norm[1]), vaddq_f64(norm[2], norm[3]));
+        let mut projection = vaddq_f64(
+            vaddq_f64(projection[0], projection[1]),
+            vaddq_f64(projection[2], projection[3]),
+        );
+        let mut weighted_predictor = vaddq_f64(
+            vaddq_f64(weighted_predictor[0], weighted_predictor[1]),
+            vaddq_f64(weighted_predictor[2], weighted_predictor[3]),
+        );
+        while index + 2 <= basis.len() {
+            // SAFETY: the common-length proof and two-element loop bound contain every load.
+            let (predictor, response, basis_value) = unsafe {
+                (
+                    vld1q_f64(predictors.as_ptr().add(index)),
+                    vld1q_f64(responses.as_ptr().add(index)),
+                    vld1q_f64(basis.as_ptr().add(index)),
+                )
+            };
+            let squared_basis = vmulq_f64(basis_value, basis_value);
+            // SAFETY: the same proof contains this two-lane output store.
+            unsafe {
+                vst1q_f64(squared_basis_output.as_mut_ptr().add(index), squared_basis);
+            }
+            norm = vfmaq_f64(norm, basis_value, basis_value);
+            projection = vfmaq_f64(projection, response, basis_value);
+            weighted_predictor = vfmaq_f64(weighted_predictor, predictor, squared_basis);
+            index += 2;
+        }
+        let mut norm = vaddvq_f64(norm);
+        let mut projection = vaddvq_f64(projection);
+        let mut weighted_predictor = vaddvq_f64(weighted_predictor);
+        while index < basis.len() {
+            let basis_value = basis[index];
+            let squared_basis = basis_value * basis_value;
+            squared_basis_output[index] = squared_basis;
+            norm += squared_basis;
+            projection = responses[index].mul_add(basis_value, projection);
+            weighted_predictor = predictors[index].mul_add(squared_basis, weighted_predictor);
+            index += 1;
+        }
+        (norm, projection, weighted_predictor)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn fused_neon_polynomial_moments_f64(
+        predictors: &[f64],
+        responses: &[f64],
+        basis: &[f64],
+        squared_basis_output: &mut [f64],
+    ) -> (f64, f64, f64) {
+        // SAFETY: NEON is part of the baseline AArch64 ISA on macOS. The safe public wrapper has
+        // already proved the equal, disjoint slice contract required by the implementation.
+        unsafe {
+            fused_neon_polynomial_moments_f64_impl(
+                predictors,
+                responses,
+                basis,
+                squared_basis_output,
+            )
+        }
+    }
+
     pub(super) fn polynomial_moments_f64(
         predictors: &[f64],
         responses: &[f64],
@@ -97,46 +205,53 @@ mod ffi {
         if predictors.is_empty() {
             return (0.0, 0.0, 0.0);
         }
-        let mut norm = 0.0;
-        let mut projection = 0.0;
-        let mut weighted_predictor = 0.0;
-        // SAFETY: validation in the safe wrapper proves that all four contiguous slices contain
-        // exactly `count` f64 elements. The mutable squared-basis output is disjoint from all
-        // immutable inputs, every stride is one, and each scalar result lives for its call.
-        unsafe {
-            vDSP_vsqD(
-                basis.as_ptr(),
-                1,
-                squared_basis.as_mut_ptr(),
-                1,
-                basis.len(),
-            );
-            vDSP_dotprD(
-                basis.as_ptr(),
-                1,
-                basis.as_ptr(),
-                1,
-                &raw mut norm,
-                basis.len(),
-            );
-            vDSP_dotprD(
-                responses.as_ptr(),
-                1,
-                basis.as_ptr(),
-                1,
-                &raw mut projection,
-                basis.len(),
-            );
-            vDSP_dotprD(
-                predictors.as_ptr(),
-                1,
-                squared_basis.as_ptr(),
-                1,
-                &raw mut weighted_predictor,
-                basis.len(),
-            );
+        #[cfg(target_arch = "aarch64")]
+        {
+            fused_neon_polynomial_moments_f64(predictors, responses, basis, squared_basis)
         }
-        (norm, projection, weighted_predictor)
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut norm = 0.0;
+            let mut projection = 0.0;
+            let mut weighted_predictor = 0.0;
+            // SAFETY: validation in the safe wrapper proves that all four contiguous slices contain
+            // exactly `count` f64 elements. The mutable squared-basis output is disjoint from all
+            // immutable inputs, every stride is one, and each scalar result lives for its call.
+            unsafe {
+                vDSP_vsqD(
+                    basis.as_ptr(),
+                    1,
+                    squared_basis.as_mut_ptr(),
+                    1,
+                    basis.len(),
+                );
+                vDSP_dotprD(
+                    basis.as_ptr(),
+                    1,
+                    basis.as_ptr(),
+                    1,
+                    &raw mut norm,
+                    basis.len(),
+                );
+                vDSP_dotprD(
+                    responses.as_ptr(),
+                    1,
+                    basis.as_ptr(),
+                    1,
+                    &raw mut projection,
+                    basis.len(),
+                );
+                vDSP_dotprD(
+                    predictors.as_ptr(),
+                    1,
+                    squared_basis.as_ptr(),
+                    1,
+                    &raw mut weighted_predictor,
+                    basis.len(),
+                );
+            }
+            (norm, projection, weighted_predictor)
+        }
     }
 }
 
@@ -349,6 +464,74 @@ mod tests {
                 .zip(&basis)
                 .all(|(observed, basis)| observed.to_bits() == (basis * basis).to_bits())
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn polynomial_moments_match_compensated_oracles_across_vector_block_residues() {
+        let lengths = [
+            0_usize, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 31, 32, 33, 127, 128, 129, 499,
+            500, 501, 1_023, 1_024, 1_025,
+        ];
+        for length in lengths {
+            let predictors = (0..length)
+                .map(|index| {
+                    let index = f64::from(u32::try_from(index).unwrap());
+                    0.73 + 0.000_31 * index + 0.017 * (0.13 * index).sin()
+                })
+                .collect::<Vec<_>>();
+            let responses = predictors
+                .iter()
+                .enumerate()
+                .map(|(index, &predictor)| {
+                    let index = f64::from(u32::try_from(index).unwrap());
+                    1.7 - 0.43 * predictor
+                        + 0.09 * predictor * predictor
+                        + 0.004 * (0.19 * index).cos()
+                })
+                .collect::<Vec<_>>();
+            let basis = predictors
+                .iter()
+                .enumerate()
+                .map(|(index, &predictor)| {
+                    let index = f64::from(u32::try_from(index).unwrap());
+                    let centered = predictor - 0.91;
+                    0.03 + centered * (-0.2 + centered * 0.7) + 0.002 * (0.07 * index).sin()
+                })
+                .collect::<Vec<_>>();
+            let mut squared_basis = vec![f64::NAN; length];
+            let observed =
+                polynomial_moments_f64(&predictors, &responses, &basis, &mut squared_basis)
+                    .unwrap();
+            let expected = [
+                compensated_sum(basis.iter().map(|value| value * value)),
+                compensated_sum(
+                    responses
+                        .iter()
+                        .zip(&basis)
+                        .map(|(response, basis)| response * basis),
+                ),
+                compensated_sum(
+                    predictors
+                        .iter()
+                        .zip(&basis)
+                        .map(|(predictor, basis)| predictor * basis * basis),
+                ),
+            ];
+            for (observed, (expected, absolute_sum)) in [observed.0, observed.1, observed.2]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_reduction_within_declared_bound(observed, expected, absolute_sum);
+            }
+            assert!(
+                squared_basis
+                    .iter()
+                    .zip(&basis)
+                    .all(|(observed, basis)| observed.to_bits() == (basis * basis).to_bits()),
+                "squared-basis scratch differs at population length {length}"
+            );
+        }
     }
 
     #[test]

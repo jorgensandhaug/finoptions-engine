@@ -4,6 +4,84 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 #[cfg(target_os = "macos")]
 use finoptions_accelerate::polynomial_moments_f64;
 
+#[cfg(target_os = "macos")]
+#[link(name = "Accelerate", kind = "framework")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn vDSP_dotprD(
+        first: *const f64,
+        first_stride: isize,
+        second: *const f64,
+        second_stride: isize,
+        result: *mut f64,
+        count: usize,
+    );
+    fn vDSP_vsqD(
+        input: *const f64,
+        input_stride: isize,
+        output: *mut f64,
+        output_stride: isize,
+        count: usize,
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn vdsp_moments_reference(
+    predictors: &[f64],
+    responses: &[f64],
+    basis: &[f64],
+    squared_basis: &mut [f64],
+) -> (f64, f64, f64) {
+    assert_eq!(predictors.len(), responses.len());
+    assert_eq!(predictors.len(), basis.len());
+    assert_eq!(predictors.len(), squared_basis.len());
+    if basis.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let mut norm = 0.0;
+    let mut projection = 0.0;
+    let mut weighted_predictor = 0.0;
+    // SAFETY: the assertions prove all contiguous slices contain `basis.len()` elements. Mutable
+    // scratch is disjoint from the immutable operands, every stride is one, and scalar outputs live
+    // through their respective calls. This benchmark-only reference is the accepted pre-candidate
+    // production implementation.
+    unsafe {
+        vDSP_vsqD(
+            basis.as_ptr(),
+            1,
+            squared_basis.as_mut_ptr(),
+            1,
+            basis.len(),
+        );
+        vDSP_dotprD(
+            basis.as_ptr(),
+            1,
+            basis.as_ptr(),
+            1,
+            &raw mut norm,
+            basis.len(),
+        );
+        vDSP_dotprD(
+            responses.as_ptr(),
+            1,
+            basis.as_ptr(),
+            1,
+            &raw mut projection,
+            basis.len(),
+        );
+        vDSP_dotprD(
+            predictors.as_ptr(),
+            1,
+            squared_basis.as_ptr(),
+            1,
+            &raw mut weighted_predictor,
+            basis.len(),
+        );
+    }
+    (norm, projection, weighted_predictor)
+}
+
 fn scalar_moments(predictors: &[f64], responses: &[f64], basis: &[f64]) -> (f64, f64, f64) {
     let mut norm = 0.0;
     let mut projection = 0.0;
@@ -45,7 +123,7 @@ fn benchmark(c: &mut Criterion) {
     });
     #[cfg(target_os = "macos")]
     {
-        group.bench_function("apple_vdsp", |bencher| {
+        group.bench_function("apple_production", |bencher| {
             bencher.iter(|| {
                 black_box(
                     polynomial_moments_f64(
@@ -56,6 +134,16 @@ fn benchmark(c: &mut Criterion) {
                     )
                     .unwrap(),
                 );
+            });
+        });
+        group.bench_function("apple_vdsp_reference", |bencher| {
+            bencher.iter(|| {
+                black_box(vdsp_moments_reference(
+                    black_box(&predictors),
+                    black_box(&responses),
+                    black_box(&basis),
+                    black_box(&mut scratch),
+                ));
             });
         });
     }
