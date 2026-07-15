@@ -8,7 +8,8 @@ The first supported slice is deliberately narrow: event-aligned deterministic ca
 node-aligned deterministic discount factors and cumulative continuous proportional-dividend
 yields, constant-volatility risk-neutral GBM, explicit finite exercise schedules, and exact
 serial/parallel path dynamics from either explicit normal variates or path-addressable seeded
-streams, and independently fitted/evaluated LSM for fixed-strike calls. Its
+streams, independently fitted/evaluated LSM for fixed-strike calls, and deterministic
+event-aligned direct integration for the same finite call schedules. Its
 checked degree-zero-through-four polynomial regression kernel has passed the solver gate.
 Unsupported semantics fail; the engine never substitutes a nearby model, algorithm, precision,
 event time, random stream, or backend.
@@ -160,6 +161,36 @@ result = price_lsm_call(
 `result` includes the independent mean, standard error, stopping counts, and every exercise-node
 regression diagnostic. Reused random domains, unsupported degree, deficient rank/support, excessive
 condition, or non-finite arithmetic raise without changing the estimator.
+
+The independent deterministic route carries its own explicit numerical identity:
+
+```python
+from finoptions import EventAlignedQuadrature, price_event_aligned_call
+
+reference = price_event_aligned_call(
+    initial_spot=100.0,
+    strike=100.0,
+    schedule=schedule,
+    curve=curve,
+    dividend_yield_curve=dividend_yield_curve,
+    volatility=ConstantVolatility(0.20),
+    dividend_policy=DividendPolicy.LIQUIDATOR,
+    executor=CpuExecutor(threads=4),
+    method=EventAlignedQuadrature(
+        upper_stock=600.0,
+        stock_points=20_001,
+        normal_order=1_024,
+    ),
+)
+```
+
+This method applies exercise before a same-node cash jump and an admitted terminal cash jump before
+expiry payoff. It uses version-pinned standard-normal rules, linear interpolation, and an explicit
+affine upper tail. `reference.maximum_upper_boundary_gap` exposes the largest computed-grid/tail
+discontinuity. The engine does not select a grid, boundary, order, or refinement sequence; research
+workflows must predeclare convergence gates and retain every level. The production implementation
+is checked against a separate adaptive one-dividend formula and an independently interpolated cash
+tree in the non-production Rust testkit.
 
 For research tables, the same estimator prices strict contiguous columns with contract-level
 parallelism and no implicit dtype or layout conversion:

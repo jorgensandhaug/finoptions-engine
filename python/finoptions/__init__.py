@@ -55,6 +55,12 @@ from .model import (
     InputError,
     LogDiscountCurve,
 )
+from .quadrature import (
+    EventAlignedQuadrature,
+    QuadratureCallResult,
+    QuadratureError,
+    price_event_aligned_call,
+)
 from .simulation import (
     CpuExecutor,
     CpuMathBackend,
@@ -98,6 +104,7 @@ __all__ = [
     "DividendPolicy",
     "EscrowedCashDividendBatch",
     "EscrowedVolatilityConvention",
+    "EventAlignedQuadrature",
     "EventSchedule",
     "ExecutionError",
     "ExerciseFitDiagnostics",
@@ -119,6 +126,8 @@ __all__ = [
     "OriginExercise",
     "PaddedCashDividends",
     "PaddedSequenceSpec",
+    "QuadratureCallResult",
+    "QuadratureError",
     "RaggedCashDividends",
     "RandomStream",
     "RegressionFitDiagnostics",
@@ -129,6 +138,7 @@ __all__ = [
     "bin_cash_dividends",
     "build_info",
     "pack_padded_cash_dividends",
+    "price_event_aligned_call",
     "price_lsm_call",
     "price_lsm_call_batch",
     "price_lsm_call_grouped_batch",

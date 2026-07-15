@@ -1,0 +1,23 @@
+[package]
+name = "finoptions-quadrature"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Event-aligned direct quadrature for finoptions-engine"
+publish = false
+
+[dependencies]
+finoptions-core.workspace = true
+finoptions-runtime.workspace = true
+finoptions-sim.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+finoptions-testkit.workspace = true
+
+[lints]
+workspace = true

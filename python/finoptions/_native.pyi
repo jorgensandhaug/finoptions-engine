@@ -6,6 +6,7 @@ class BatchError(ValueError): ...
 class ExecutionError(RuntimeError): ...
 class SimulationError(RuntimeError): ...
 class LsmError(RuntimeError): ...
+class QuadratureError(RuntimeError): ...
 
 type NativeExerciseDiagnostic = tuple[
     int,
@@ -41,6 +42,15 @@ class CpuExecutor:
     def threads(self) -> int: ...
     @property
     def math_backend(self) -> str: ...
+
+class EventAlignedQuadrature:
+    def __init__(self, upper_stock: float, stock_points: int, normal_order: int) -> None: ...
+    @property
+    def upper_stock(self) -> float: ...
+    @property
+    def stock_points(self) -> int: ...
+    @property
+    def normal_order(self) -> int: ...
 
 def build_info() -> tuple[str, str]: ...
 def bin_dividends_f32(
@@ -159,6 +169,23 @@ def price_lsm_call_seeded_f64(
     list[int],
     list[NativeExerciseDiagnostic],
 ]: ...
+def price_event_aligned_call_f64(
+    initial_spot: float,
+    strike: float,
+    schedule_times: list[float],
+    curve_times: list[float],
+    log_discounts: list[float],
+    dividend_yield_times: list[float],
+    cumulative_dividend_yields: list[float],
+    dividend_nodes: list[int],
+    dividend_amounts: list[float],
+    exercise_nodes: list[int],
+    expiry_node: int,
+    annualized_volatility: float,
+    dividend_policy: str,
+    executor: CpuExecutor,
+    method: EventAlignedQuadrature,
+) -> tuple[float, float]: ...
 def price_lsm_call_batch_continuous_yield_f64(
     initial_spots: npt.NDArray[np.float64],
     strikes: npt.NDArray[np.float64],

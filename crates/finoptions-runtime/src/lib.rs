@@ -422,6 +422,24 @@ impl CpuExecutor {
             Some(pool) => pool.install(parallel),
         }
     }
+
+    /// Dispatches one serial or parallel kernel with exclusive access to caller-owned state.
+    ///
+    /// This form allows both candidate closures to operate on the same mutable buffer without raw
+    /// pointers, interior mutability, duplicate allocation, or consulting Rayon's global pool.
+    /// Exactly one closure receives the state according to the executor's declared worker count.
+    pub fn dispatch_mut<T, R, S, P>(&self, state: &mut T, serial: S, parallel: P) -> R
+    where
+        T: Send + ?Sized,
+        R: Send,
+        S: FnOnce(&mut T) -> R,
+        P: FnOnce(&mut T) -> R + Send,
+    {
+        match &self.pool {
+            None => serial(state),
+            Some(pool) => pool.install(|| parallel(state)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -553,5 +571,24 @@ mod tests {
         assert_eq!(result, 11);
         assert!(!serial_called.load(Ordering::Relaxed));
         assert!(parallel_called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn dispatches_exclusive_state_to_exactly_one_kernel() {
+        let mut serial_state = vec![1_u32, 2, 3];
+        CpuExecutor::try_new(1).unwrap().dispatch_mut(
+            &mut serial_state,
+            |state| state[1] = 7,
+            |state| state[1] = 11,
+        );
+        assert_eq!(serial_state, [1, 7, 3]);
+
+        let mut parallel_state = vec![1_u32, 2, 3];
+        CpuExecutor::try_new(2).unwrap().dispatch_mut(
+            &mut parallel_state,
+            |state| state[1] = 7,
+            |state| state[1] = 11,
+        );
+        assert_eq!(parallel_state, [1, 11, 3]);
     }
 }

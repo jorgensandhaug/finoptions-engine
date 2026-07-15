@@ -25,6 +25,11 @@ use finoptions_lsm::{
     PolynomialRegressionSpec as CorePolynomialRegressionSpec,
     UniformExerciseMesh as CoreUniformExerciseMesh,
 };
+use finoptions_quadrature::{
+    EventAlignedQuadrature as CoreEventAlignedQuadrature,
+    EventAlignedQuadratureSpec as CoreEventAlignedQuadratureSpec,
+    QuadratureError as CoreQuadratureError,
+};
 use finoptions_runtime::{
     CpuExecutor as CoreCpuExecutor, CpuMathBackend as CoreCpuMathBackend,
     ExecutionError as CoreExecutionError,
@@ -46,11 +51,45 @@ create_exception!(_native, BatchError, PyValueError);
 create_exception!(_native, ExecutionError, PyRuntimeError);
 create_exception!(_native, SimulationError, PyRuntimeError);
 create_exception!(_native, LsmError, PyRuntimeError);
+create_exception!(_native, QuadratureError, PyRuntimeError);
 
 /// Dedicated native CPU worker pool owned by the public Python execution specification.
 #[pyclass(name = "CpuExecutor", frozen, module = "finoptions._native")]
 struct NativeCpuExecutor {
     inner: CoreCpuExecutor,
+}
+
+/// Reusable event-aligned direct-integration rule with explicit numerical controls.
+#[pyclass(name = "EventAlignedQuadrature", frozen, module = "finoptions._native")]
+struct NativeEventAlignedQuadrature {
+    inner: CoreEventAlignedQuadrature,
+}
+
+#[pymethods]
+impl NativeEventAlignedQuadrature {
+    #[new]
+    fn new(upper_stock: f64, stock_points: usize, normal_order: usize) -> PyResult<Self> {
+        let spec = CoreEventAlignedQuadratureSpec::try_new(upper_stock, stock_points, normal_order)
+            .map_err(CoreQuadratureError::into_py_quadrature_error)?;
+        CoreEventAlignedQuadrature::try_new(spec)
+            .map(|inner| Self { inner })
+            .map_err(CoreQuadratureError::into_py_quadrature_error)
+    }
+
+    #[getter]
+    fn upper_stock(&self) -> f64 {
+        self.inner.spec().upper_stock()
+    }
+
+    #[getter]
+    fn stock_points(&self) -> usize {
+        self.inner.spec().stock_points()
+    }
+
+    #[getter]
+    fn normal_order(&self) -> usize {
+        self.inner.spec().normal_order()
+    }
 }
 
 #[pymethods]
@@ -155,6 +194,31 @@ impl IntoPySimulationError for CoreSimulationError {
 
 trait IntoPyLsmError {
     fn into_py_lsm_error(self) -> PyErr;
+}
+
+trait IntoPyQuadratureError {
+    fn into_py_quadrature_error(self) -> PyErr;
+}
+
+impl IntoPyQuadratureError for CoreQuadratureError {
+    fn into_py_quadrature_error(self) -> PyErr {
+        let message = self.to_string();
+        match self {
+            CoreQuadratureError::FinancialInput(_)
+            | CoreQuadratureError::DiscountTimeGridMismatch
+            | CoreQuadratureError::DividendYieldTimeGridMismatch
+            | CoreQuadratureError::InvalidInitialSpot { .. }
+            | CoreQuadratureError::InvalidStrike { .. }
+            | CoreQuadratureError::InvalidUpperStockBoundary { .. }
+            | CoreQuadratureError::UpperStockBoundaryTooLow { .. }
+            | CoreQuadratureError::TooFewStockPoints { .. }
+            | CoreQuadratureError::TooManyStockPoints { .. }
+            | CoreQuadratureError::UnsupportedQuadratureOrder { .. } => {
+                InputError::new_err(message)
+            }
+            _ => QuadratureError::new_err(message),
+        }
+    }
 }
 
 impl IntoPyLsmError for CoreLsmError {
@@ -554,6 +618,46 @@ fn parse_gbm_model(
     annualized_volatility: f64,
     dividend_policy: &str,
 ) -> PyResult<(GbmPathPlan, LogDiscountCurve)> {
+    let (schedule, curve, dividend_yield_curve, volatility, policy) = parse_gbm_financial_inputs(
+        schedule_times,
+        curve_times,
+        log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+        annualized_volatility,
+        dividend_policy,
+    )?;
+    let plan = GbmPathPlan::try_new(&schedule, &curve, &dividend_yield_curve, volatility, policy)
+        .map_err(CoreSimulationError::into_py_simulation_error)?;
+    Ok((plan, curve))
+}
+
+type CoreGbmFinancialInputs = (
+    EventSchedule,
+    LogDiscountCurve,
+    CumulativeDividendYieldCurve,
+    ConstantVolatility,
+    DividendPolicy,
+);
+
+#[allow(clippy::too_many_arguments)]
+fn parse_gbm_financial_inputs(
+    schedule_times: Vec<f64>,
+    curve_times: Vec<f64>,
+    log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+    annualized_volatility: f64,
+    dividend_policy: &str,
+) -> PyResult<CoreGbmFinancialInputs> {
     let schedule = parse_event_schedule(
         schedule_times,
         dividend_nodes,
@@ -573,9 +677,60 @@ fn parse_gbm_model(
     let volatility = ConstantVolatility::try_new(annualized_volatility)
         .map_err(CoreInputError::into_py_input_error)?;
     let policy = parse_dividend_policy(dividend_policy)?;
-    let plan = GbmPathPlan::try_new(&schedule, &curve, &dividend_yield_curve, volatility, policy)
-        .map_err(CoreSimulationError::into_py_simulation_error)?;
-    Ok((plan, curve))
+    Ok((schedule, curve, dividend_yield_curve, volatility, policy))
+}
+
+/// Prices one exact event schedule with the reusable deterministic quadrature method.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn price_event_aligned_call_f64(
+    py: Python<'_>,
+    initial_spot: f64,
+    strike: f64,
+    schedule_times: Vec<f64>,
+    curve_times: Vec<f64>,
+    log_discounts: Vec<f64>,
+    dividend_yield_times: Vec<f64>,
+    cumulative_dividend_yields: Vec<f64>,
+    dividend_nodes: Vec<u32>,
+    dividend_amounts: Vec<f64>,
+    exercise_nodes: Vec<u32>,
+    expiry_node: u32,
+    annualized_volatility: f64,
+    dividend_policy: &str,
+    executor: PyRef<'_, NativeCpuExecutor>,
+    method: PyRef<'_, NativeEventAlignedQuadrature>,
+) -> PyResult<(f64, f64)> {
+    let (schedule, curve, dividend_yield_curve, volatility, policy) = parse_gbm_financial_inputs(
+        schedule_times,
+        curve_times,
+        log_discounts,
+        dividend_yield_times,
+        cumulative_dividend_yields,
+        dividend_nodes,
+        dividend_amounts,
+        exercise_nodes,
+        expiry_node,
+        annualized_volatility,
+        dividend_policy,
+    )?;
+    let core_method = &method.inner;
+    let core_executor = &executor.inner;
+    let result = py
+        .detach(move || {
+            core_method.price_call(
+                core_executor,
+                initial_spot,
+                strike,
+                &schedule,
+                &curve,
+                &dividend_yield_curve,
+                volatility,
+                policy,
+            )
+        })
+        .map_err(CoreQuadratureError::into_py_quadrature_error)?;
+    Ok((result.price(), result.maximum_upper_boundary_gap()))
 }
 
 fn simulated_into_array(
@@ -1585,17 +1740,20 @@ fn price_lsm_call_grouped_batch_escrowed_cash_dividends_f64<'py>(
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeCpuExecutor>()?;
+    module.add_class::<NativeEventAlignedQuadrature>()?;
     module.add("InputError", module.py().get_type::<InputError>())?;
     module.add("BatchError", module.py().get_type::<BatchError>())?;
     module.add("ExecutionError", module.py().get_type::<ExecutionError>())?;
     module.add("SimulationError", module.py().get_type::<SimulationError>())?;
     module.add("LsmError", module.py().get_type::<LsmError>())?;
+    module.add("QuadratureError", module.py().get_type::<QuadratureError>())?;
     module.add_function(wrap_pyfunction!(build_info, module)?)?;
     module.add_function(wrap_pyfunction!(bin_dividends_f32, module)?)?;
     module.add_function(wrap_pyfunction!(pack_padded_dividends_f32, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_f64, module)?)?;
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;
+    module.add_function(wrap_pyfunction!(price_event_aligned_call_f64, module)?)?;
     module.add_function(wrap_pyfunction!(
         price_lsm_call_batch_continuous_yield_f64,
         module

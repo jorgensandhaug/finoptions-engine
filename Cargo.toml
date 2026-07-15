@@ -5,6 +5,7 @@ members = [
   "crates/finoptions-core",
   "crates/finoptions-lsm",
   "crates/finoptions-python",
+  "crates/finoptions-quadrature",
   "crates/finoptions-runtime",
   "crates/finoptions-sim",
   "crates/finoptions-testkit",
@@ -26,10 +27,13 @@ finoptions-accelerate = { path = "crates/finoptions-accelerate", version = "0.1.
 finoptions-batch = { path = "crates/finoptions-batch", version = "0.1.0" }
 finoptions-core = { path = "crates/finoptions-core", version = "0.1.0" }
 finoptions-lsm = { path = "crates/finoptions-lsm", version = "0.1.0" }
+finoptions-quadrature = { path = "crates/finoptions-quadrature", version = "0.1.0" }
 finoptions-runtime = { path = "crates/finoptions-runtime", version = "0.1.0" }
 finoptions-sim = { path = "crates/finoptions-sim", version = "0.1.0" }
+finoptions-testkit = { path = "crates/finoptions-testkit", version = "0.1.0" }
 ndarray = "0.17.2"
 nalgebra = { version = "0.35.0", default-features = false, features = ["std"] }
+libm = "0.2.16"
 numpy = "0.29.0"
 pyo3 = "0.29.0"
 rayon = "1.12.0"
