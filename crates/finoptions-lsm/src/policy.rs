@@ -146,6 +146,16 @@ impl LsmCallEstimator {
         curve: &LogDiscountCurve,
         initial_spot: f64,
     ) -> Result<FittedLsmCallPolicy, LsmError> {
+        self.fit_with_math_backend(training, curve, initial_spot, CpuMathBackend::RustStdF64)
+    }
+
+    pub(crate) fn fit_with_math_backend(
+        self,
+        training: &SimulatedPaths,
+        curve: &LogDiscountCurve,
+        initial_spot: f64,
+        math_backend: CpuMathBackend,
+    ) -> Result<FittedLsmCallPolicy, LsmError> {
         validate_initial_spot(initial_spot)?;
         validate_curve(training, curve)?;
         let training_count = path_count("training", training)?;
@@ -180,6 +190,7 @@ impl LsmCallEstimator {
                 &mut candidate_states,
                 &mut candidate_values,
                 &mut regression_workspace,
+                math_backend,
             )?;
             reversed_rules.push(rule);
             reversed_diagnostics.push(ExerciseNodeDiagnostics {
@@ -251,7 +262,8 @@ impl LsmCallEstimator {
         let training = plan
             .simulate_seeded_with(executor, initial_spot, training_paths, training_stream)
             .map_err(|source| LsmError::TrainingSimulation { source })?;
-        let policy = self.fit(&training, curve, initial_spot)?;
+        let policy =
+            self.fit_with_math_backend(&training, curve, initial_spot, executor.math_backend())?;
         drop(training);
         let evaluation_paths = plan
             .simulate_seeded_with(executor, initial_spot, evaluation_paths, evaluation_stream)
@@ -312,7 +324,7 @@ impl LsmCallEstimator {
                 training_stream,
             )
             .map_err(|source| LsmError::TrainingSimulation { source })?;
-        let policy = self.fit(&training, curve, initial_spot)?;
+        let policy = self.fit_with_math_backend(&training, curve, initial_spot, math_backend)?;
         drop(training);
         let evaluation_paths = plan
             .simulate_seeded_with_math_backend(
@@ -378,7 +390,7 @@ impl LsmCallEstimator {
                 training_stream,
             )
             .map_err(|source| LsmError::TrainingSimulation { source })?;
-        let policy = self.fit(&training, curve, initial_spot)?;
+        let policy = self.fit_with_math_backend(&training, curve, initial_spot, math_backend)?;
         drop(training);
         let evaluation_paths = plan
             .simulate_seeded_with_math_backend(
@@ -402,6 +414,7 @@ impl LsmCallEstimator {
         candidate_states: &mut Vec<f64>,
         candidate_values: &mut Vec<f64>,
         workspace: &mut RegressionWorkspace,
+        math_backend: CpuMathBackend,
     ) -> Result<(ExerciseRule, ExerciseFitDiagnostics), LsmError> {
         candidate_states.clear();
         candidate_values.clear();
@@ -418,10 +431,11 @@ impl LsmCallEstimator {
             ));
         }
         let model = workspace
-            .fit(
+            .fit_with_math_backend(
                 &candidate_states[..],
                 &candidate_values[..],
                 self.regression,
+                math_backend,
             )
             .map_err(|source| LsmError::RegressionAtNode {
                 node: node.get(),

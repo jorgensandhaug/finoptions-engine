@@ -367,10 +367,7 @@ fn benchmark(criterion: &mut Criterion) {
     #[cfg(target_os = "macos")]
     let backends = [
         ("rust_std_f64", CpuMathBackend::RustStdF64),
-        (
-            "apple_accelerate_vforce",
-            CpuMathBackend::AppleAccelerateVforce,
-        ),
+        ("apple_accelerate", CpuMathBackend::AppleAccelerate),
     ];
     #[cfg(not(target_os = "macos"))]
     let backends = [("rust_std_f64", CpuMathBackend::RustStdF64)];

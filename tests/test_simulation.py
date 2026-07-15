@@ -224,7 +224,7 @@ def test_cpu_math_backend_is_explicit_strict_and_platform_checked() -> None:
         with pytest.raises(ExecutionError, match="unavailable"):
             CpuExecutor(
                 threads=1,
-                math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+                math_backend=CpuMathBackend.APPLE_ACCELERATE,
             )
         return
 
@@ -247,14 +247,14 @@ def test_cpu_math_backend_is_explicit_strict_and_platform_checked() -> None:
         **external_common,
         executor=CpuExecutor(
             threads=1,
-            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE,
         ),
     )
     external_apple_parallel = simulate_gbm(
         **external_common,
         executor=CpuExecutor(
             threads=4,
-            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE,
         ),
     )
     assert np.array_equal(external_apple_serial.states, external_apple_parallel.states)
@@ -279,14 +279,14 @@ def test_cpu_math_backend_is_explicit_strict_and_platform_checked() -> None:
         **common,
         executor=CpuExecutor(
             threads=1,
-            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE,
         ),
     )
     parallel = simulate_gbm_seeded(
         **common,
         executor=CpuExecutor(
             threads=4,
-            math_backend=CpuMathBackend.APPLE_ACCELERATE_VFORCE,
+            math_backend=CpuMathBackend.APPLE_ACCELERATE,
         ),
     )
     assert np.array_equal(serial.states, parallel.states)

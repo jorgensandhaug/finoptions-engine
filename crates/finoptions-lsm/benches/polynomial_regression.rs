@@ -2,6 +2,7 @@ use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use finoptions_lsm::{PolynomialDegree, PolynomialRegressionSpec, RegressionBenchmark};
+use finoptions_sim::CpuMathBackend;
 use nalgebra::{DMatrix, DVector};
 
 fn population(observations: usize) -> (Vec<f64>, Vec<f64>) {
@@ -37,7 +38,7 @@ fn benchmark(c: &mut Criterion) {
         let mut production = RegressionBenchmark::new(spec);
         group.throughput(Throughput::Elements(u64::from(observation_count)));
         group.bench_with_input(
-            BenchmarkId::new("empirical_orthogonal", observations),
+            BenchmarkId::new("empirical_orthogonal_rust_std_f64", observations),
             &observations,
             |bencher, _| {
                 bencher.iter(|| {
@@ -49,6 +50,25 @@ fn benchmark(c: &mut Criterion) {
                 });
             },
         );
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut accelerated =
+                RegressionBenchmark::new_with_math_backend(spec, CpuMathBackend::AppleAccelerate);
+            group.bench_with_input(
+                BenchmarkId::new("empirical_orthogonal_apple_accelerate", observations),
+                &observations,
+                |bencher, _| {
+                    bencher.iter(|| {
+                        black_box(
+                            accelerated
+                                .fit(black_box(&predictors), black_box(&responses))
+                                .unwrap(),
+                        );
+                    });
+                },
+            );
+        }
 
         let mean = predictors.iter().sum::<f64>() / f64::from(observation_count);
         let scale = (predictors

@@ -95,7 +95,7 @@ impl GbmPathPlan {
     ) -> Result<SimulatedPaths, SimulationError> {
         match math_backend {
             CpuMathBackend::RustStdF64 => self.simulate_seeded(initial_spot, paths, stream),
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 self.simulate_seeded_vector_exp(math_backend, initial_spot, paths, stream)
             }
         }
@@ -206,7 +206,7 @@ impl GbmPathPlan {
             CpuMathBackend::RustStdF64 => {
                 self.simulate_seeded_parallel(initial_spot, paths, stream)
             }
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 self.simulate_seeded_vector_exp_parallel(math_backend, initial_spot, paths, stream)
             }
         }
@@ -546,11 +546,9 @@ mod tests {
         let stream = RandomStream::new(7, 11);
         let scalar = plan.simulate_seeded(100.0, 257, stream).unwrap();
         let serial_executor =
-            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
+            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerate).unwrap();
         let parallel_executor =
-            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerate).unwrap();
         let apple_serial = plan
             .simulate_seeded_with(&serial_executor, 100.0, 257, stream)
             .unwrap();
@@ -580,8 +578,7 @@ mod tests {
     #[test]
     fn apple_vector_backend_reports_transition_failure_without_scalar_substitution() {
         let executor =
-            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerate).unwrap();
         let error = plan()
             .simulate_seeded_with(&executor, f64::MAX, 257, RandomStream::new(7, 11))
             .unwrap_err();

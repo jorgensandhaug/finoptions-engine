@@ -33,7 +33,7 @@ class CpuMathBackend(StrEnum):
     """Named floating-point implementation for vectorizable CPU pricing kernels."""
 
     RUST_STD_F64 = "rust_std_f64"
-    APPLE_ACCELERATE_VFORCE = "apple_accelerate_vforce"
+    APPLE_ACCELERATE = "apple_accelerate"
 
 
 @dataclass(frozen=True, slots=True)

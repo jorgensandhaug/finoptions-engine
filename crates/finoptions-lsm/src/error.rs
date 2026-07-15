@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use finoptions_sim::SimulationError;
+use finoptions_sim::{CpuMathError, SimulationError};
 
 /// A fail-fast violation of the declared polynomial regression estimator.
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -84,6 +84,16 @@ pub enum RegressionError {
         index: usize,
         /// Invalid value.
         observed: f64,
+    },
+
+    /// The explicit numerical backend rejected a regression reduction request.
+    #[error("CPU numerical backend {backend} regression reduction failed: {source}")]
+    CpuMath {
+        /// Stable backend identifier.
+        backend: &'static str,
+        /// Typed runtime-kernel failure.
+        #[source]
+        source: CpuMathError,
     },
 
     /// A positive-degree fit has no representable predictor variation.

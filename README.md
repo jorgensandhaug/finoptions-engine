@@ -85,9 +85,10 @@ audits and externally generated variance-reduction designs. A dedicated executor
 to the global thread pool or another backend.
 
 `CpuExecutor` defaults to the portable `CpuMathBackend.RUST_STD_F64`. On macOS, callers may request
-`CpuMathBackend.APPLE_ACCELERATE_VFORCE` explicitly; unsupported platforms fail during executor
-construction. The selected backend is inspectable and belongs in every reproducible execution
-manifest because vector and scalar transcendental implementations need not return identical bits.
+`CpuMathBackend.APPLE_ACCELERATE` explicitly; unsupported platforms fail during executor
+construction. The Apple backend uses vForce for GBM exponentials and vDSP for continuation-
+regression reductions. The selected backend is inspectable and belongs in every reproducible
+execution manifest because vector and scalar implementations need not return identical bits.
 
 The same executor builds model inputs without storing a second padded dataset:
 

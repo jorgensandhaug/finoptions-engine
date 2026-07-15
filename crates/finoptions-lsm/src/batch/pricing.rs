@@ -480,7 +480,7 @@ impl<'a> GroupedBatchLsmCallInputs<'a> {
             )
             .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
             let policy = estimator
-                .fit(&training, &curve, self.initial_spots[group])
+                .fit_with_math_backend(&training, &curve, self.initial_spots[group], math_backend)
                 .map_err(|source| BatchLsmError::EstimatorAtRow { row, source })?;
             policies.push(policy);
         }
@@ -1922,11 +1922,9 @@ mod tests {
             &yields,
         );
         let serial_executor =
-            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
+            CpuExecutor::try_new_with_math_backend(1, CpuMathBackend::AppleAccelerate).unwrap();
         let parallel_executor =
-            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
+            CpuExecutor::try_new_with_math_backend(4, CpuMathBackend::AppleAccelerate).unwrap();
         let serial = inputs
             .price(method(OriginExercise::Excluded), &serial_executor)
             .unwrap();

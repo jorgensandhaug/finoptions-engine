@@ -12,6 +12,13 @@ publish = false
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "polynomial_moments"
+harness = false
+
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

@@ -1,5 +1,9 @@
 # Grouped-strike LSM performance checkpoint: 2026-07-14
 
+> Historical identifier: this checkpoint used engine commit `b929056` and the then-current
+> `apple_accelerate_vforce` name. ADR 0012 later broadened and renamed that explicit backend to
+> `apple_accelerate`; the measurements below intentionally retain their original identity.
+
 This is a reproducible local comparison, not a cross-machine guarantee. Both paths use the same
 financial method, Apple vForce backend, eight-thread executor, contract order, and complete timed
 validation/plan construction. Their stochastic identities intentionally differ: the row path uses

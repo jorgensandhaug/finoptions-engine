@@ -1,5 +1,7 @@
 //! Allocation-reusing low-degree polynomial least squares.
 
+use finoptions_sim::CpuMathBackend;
+
 use crate::RegressionError;
 
 /// Largest polynomial degree admitted by the current production evidence gate.
@@ -205,11 +207,22 @@ pub(crate) struct RegressionWorkspace {
 }
 
 impl RegressionWorkspace {
+    #[cfg(test)]
     pub(crate) fn fit(
         &mut self,
         predictors: &[f64],
         responses: &[f64],
         spec: PolynomialRegressionSpec,
+    ) -> Result<PolynomialModel, RegressionError> {
+        self.fit_with_math_backend(predictors, responses, spec, CpuMathBackend::RustStdF64)
+    }
+
+    pub(crate) fn fit_with_math_backend(
+        &mut self,
+        predictors: &[f64],
+        responses: &[f64],
+        spec: PolynomialRegressionSpec,
+        math_backend: CpuMathBackend,
     ) -> Result<PolynomialModel, RegressionError> {
         let observation_count = validate_columns(predictors, responses, spec)?;
 
@@ -227,7 +240,7 @@ impl RegressionWorkspace {
         self.previous.fill(0.0);
         self.current.fill(1.0);
 
-        let fit = self.fit_orthogonal(responses, observation_count, spec)?;
+        let fit = self.fit_orthogonal(responses, observation_count, spec, math_backend)?;
         let (rank, condition_number) = diagnose_design(&fit, spec)?;
 
         Ok(PolynomialModel {
@@ -253,6 +266,7 @@ impl RegressionWorkspace {
         responses: &[f64],
         observations: u32,
         spec: PolynomialRegressionSpec,
+        math_backend: CpuMathBackend,
     ) -> Result<OrthogonalFit, RegressionError> {
         let degree = spec.degree.get();
 
@@ -263,8 +277,13 @@ impl RegressionWorkspace {
         let mut previous_norm = 1.0;
 
         for basis_degree in 0..=degree {
-            let (norm, projection, weighted_predictor) =
-                moments(&self.standardized, responses, &self.current);
+            let (norm, projection, weighted_predictor) = moments(
+                math_backend,
+                &self.standardized,
+                responses,
+                &self.current,
+                &mut self.next,
+            )?;
             if !norm.is_finite() || !projection.is_finite() || !weighted_predictor.is_finite() {
                 return Err(RegressionError::NonFiniteFit { basis_degree });
             }
@@ -449,17 +468,19 @@ fn predictor_location_scale(
     Ok((mean, scale))
 }
 
-fn moments(standardized: &[f64], responses: &[f64], basis: &[f64]) -> (f64, f64, f64) {
-    let mut norm = 0.0;
-    let mut projection = 0.0;
-    let mut weighted_predictor = 0.0;
-    for ((&predictor, &response), &basis_value) in standardized.iter().zip(responses).zip(basis) {
-        let squared_basis = basis_value * basis_value;
-        norm += squared_basis;
-        projection = response.mul_add(basis_value, projection);
-        weighted_predictor = predictor.mul_add(squared_basis, weighted_predictor);
-    }
-    (norm, projection, weighted_predictor)
+fn moments(
+    math_backend: CpuMathBackend,
+    standardized: &[f64],
+    responses: &[f64],
+    basis: &[f64],
+    squared_basis: &mut [f64],
+) -> Result<(f64, f64, f64), RegressionError> {
+    math_backend
+        .polynomial_moments_f64(standardized, responses, basis, squared_basis)
+        .map_err(|source| RegressionError::CpuMath {
+            backend: math_backend.as_str(),
+            source,
+        })
 }
 
 fn orthonormal_basis_transform(
@@ -594,6 +615,7 @@ fn column_products(
 pub struct RegressionBenchmark {
     workspace: RegressionWorkspace,
     spec: PolynomialRegressionSpec,
+    math_backend: CpuMathBackend,
 }
 
 #[cfg(feature = "bench-internals")]
@@ -604,6 +626,20 @@ impl RegressionBenchmark {
         Self {
             workspace: RegressionWorkspace::default(),
             spec,
+            math_backend: CpuMathBackend::RustStdF64,
+        }
+    }
+
+    /// Creates a benchmark wrapper using one explicit CPU numerical implementation.
+    #[must_use]
+    pub fn new_with_math_backend(
+        spec: PolynomialRegressionSpec,
+        math_backend: CpuMathBackend,
+    ) -> Self {
+        Self {
+            workspace: RegressionWorkspace::default(),
+            spec,
+            math_backend,
         }
     }
 
@@ -617,7 +653,12 @@ impl RegressionBenchmark {
         predictors: &[f64],
         responses: &[f64],
     ) -> Result<(RegressionDiagnostics, f64), RegressionError> {
-        let model = self.workspace.fit(predictors, responses, self.spec)?;
+        let model = self.workspace.fit_with_math_backend(
+            predictors,
+            responses,
+            self.spec,
+            self.math_backend,
+        )?;
         Ok((model.diagnostics(), model.predict(predictors[0])?))
     }
 }
@@ -742,6 +783,36 @@ mod tests {
             let mut workspace = RegressionWorkspace::default();
             let model = workspace
                 .fit(&predictors, &responses, spec(4, 1.0e8))
+                .unwrap();
+            let (oracle_predictions, oracle_condition) =
+                svd_oracle(&predictors, &responses, &model);
+
+            for (&predictor, &oracle) in predictors.iter().zip(&oracle_predictions) {
+                assert_close(model.predict(predictor).unwrap(), oracle, 2.0e-11, 2.0e-12);
+            }
+            assert_close(
+                model.diagnostics().condition_number(),
+                oracle_condition,
+                2.0e-11,
+                2.0e-12,
+            );
+            assert_eq!(model.diagnostics().rank(), 5);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_accelerate_agrees_with_independent_svd_on_predictions_and_conditioning() {
+        for observations in [500, 65_536] {
+            let (predictors, responses) = representative_population(observations);
+            let mut workspace = RegressionWorkspace::default();
+            let model = workspace
+                .fit_with_math_backend(
+                    &predictors,
+                    &responses,
+                    spec(4, 1.0e8),
+                    CpuMathBackend::AppleAccelerate,
+                )
                 .unwrap();
             let (oracle_predictions, oracle_condition) =
                 svd_oracle(&predictors, &responses, &model);

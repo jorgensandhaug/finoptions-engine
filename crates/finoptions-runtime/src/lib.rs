@@ -3,13 +3,13 @@
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use thiserror::Error;
 
-/// Explicit double-precision transcendental implementation for CPU kernels.
+/// Explicit double-precision numerical implementation for CPU kernels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CpuMathBackend {
     /// Rust standard-library scalar `f64` operations.
     RustStdF64,
-    /// Apple Accelerate vForce vector kernels. Available only on macOS.
-    AppleAccelerateVforce,
+    /// Apple Accelerate vForce and vDSP kernels. Available only on macOS.
+    AppleAccelerate,
 }
 
 impl CpuMathBackend {
@@ -18,7 +18,7 @@ impl CpuMathBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RustStdF64 => "rust_std_f64",
-            Self::AppleAccelerateVforce => "apple_accelerate_vforce",
+            Self::AppleAccelerate => "apple_accelerate",
         }
     }
 
@@ -41,7 +41,62 @@ impl CpuMathBackend {
                 }
                 Ok(())
             }
-            Self::AppleAccelerateVforce => apple_exp_f64(input, output),
+            Self::AppleAccelerate => apple_exp_f64(input, output),
+        }
+    }
+
+    /// Computes the three reductions used by one empirical orthogonal-polynomial basis vector.
+    ///
+    /// The result is `(sum(basis^2), sum(responses * basis),
+    /// sum(predictors * basis^2))`. `squared_basis` is caller-owned workspace whose contents after
+    /// a successful call are backend-specific and must not be observed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns before writing workspace unless every operand has the same length, or when the
+    /// explicitly requested implementation is unavailable. No other backend is attempted.
+    #[inline]
+    pub fn polynomial_moments_f64(
+        self,
+        predictors: &[f64],
+        responses: &[f64],
+        basis: &[f64],
+        squared_basis: &mut [f64],
+    ) -> Result<(f64, f64, f64), CpuMathError> {
+        const OPERATION: &str = "polynomial_moments_f64";
+        let expected = predictors.len();
+        for (operand, observed) in [
+            ("responses", responses.len()),
+            ("basis", basis.len()),
+            ("squared_basis", squared_basis.len()),
+        ] {
+            if observed != expected {
+                return Err(CpuMathError::OperandLengthMismatch {
+                    operation: OPERATION,
+                    operand,
+                    expected,
+                    observed,
+                });
+            }
+        }
+        match self {
+            Self::RustStdF64 => {
+                let mut norm = 0.0;
+                let mut projection = 0.0;
+                let mut weighted_predictor = 0.0;
+                for ((&predictor, &response), &basis_value) in
+                    predictors.iter().zip(responses).zip(basis)
+                {
+                    let squared_basis = basis_value * basis_value;
+                    norm += squared_basis;
+                    projection = response.mul_add(basis_value, projection);
+                    weighted_predictor = predictor.mul_add(squared_basis, weighted_predictor);
+                }
+                Ok((norm, projection, weighted_predictor))
+            }
+            Self::AppleAccelerate => {
+                apple_polynomial_moments_f64(predictors, responses, basis, squared_basis)
+            }
         }
     }
 }
@@ -57,6 +112,21 @@ pub enum CpuMathError {
         input: usize,
         /// Output elements.
         output: usize,
+    },
+
+    /// Operands of one named multi-vector kernel have different element counts.
+    #[error(
+        "CPU math kernel {operation} operand {operand} has length {observed}; expected {expected}"
+    )]
+    OperandLengthMismatch {
+        /// Stable kernel identifier.
+        operation: &'static str,
+        /// Stable operand identifier.
+        operand: &'static str,
+        /// Required element count.
+        expected: usize,
+        /// Observed element count.
+        observed: usize,
     },
 
     /// The requested named implementation is not compiled for this platform.
@@ -79,7 +149,42 @@ fn apple_exp_f64(input: &[f64], output: &mut [f64]) -> Result<(), CpuMathError> 
 #[cfg(not(target_os = "macos"))]
 fn apple_exp_f64(_input: &[f64], _output: &mut [f64]) -> Result<(), CpuMathError> {
     Err(CpuMathError::BackendUnavailable {
-        backend: CpuMathBackend::AppleAccelerateVforce.as_str(),
+        backend: CpuMathBackend::AppleAccelerate.as_str(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn apple_polynomial_moments_f64(
+    predictors: &[f64],
+    responses: &[f64],
+    basis: &[f64],
+    squared_basis: &mut [f64],
+) -> Result<(f64, f64, f64), CpuMathError> {
+    finoptions_accelerate::polynomial_moments_f64(predictors, responses, basis, squared_basis)
+        .map_err(|error| match error {
+            finoptions_accelerate::VectorKernelError::OperandLengthMismatch {
+                operation,
+                operand,
+                expected,
+                observed,
+            } => CpuMathError::OperandLengthMismatch {
+                operation,
+                operand,
+                expected,
+                observed,
+            },
+        })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_polynomial_moments_f64(
+    _predictors: &[f64],
+    _responses: &[f64],
+    _basis: &[f64],
+    _squared_basis: &mut [f64],
+) -> Result<(f64, f64, f64), CpuMathError> {
+    Err(CpuMathError::BackendUnavailable {
+        backend: CpuMathBackend::AppleAccelerate.as_str(),
     })
 }
 
@@ -143,7 +248,7 @@ impl CpuExecutor {
         if threads == 0 {
             return Err(ExecutionError::EmptyThreadPool);
         }
-        if math_backend == CpuMathBackend::AppleAccelerateVforce && !cfg!(target_os = "macos") {
+        if math_backend == CpuMathBackend::AppleAccelerate && !cfg!(target_os = "macos") {
             return Err(ExecutionError::MathBackendUnavailable {
                 backend: math_backend.as_str(),
             });
@@ -223,12 +328,8 @@ mod tests {
     #[test]
     fn preserves_explicit_apple_math_backend() {
         let executor =
-            CpuExecutor::try_new_with_math_backend(2, CpuMathBackend::AppleAccelerateVforce)
-                .unwrap();
-        assert_eq!(
-            executor.math_backend(),
-            CpuMathBackend::AppleAccelerateVforce
-        );
+            CpuExecutor::try_new_with_math_backend(2, CpuMathBackend::AppleAccelerate).unwrap();
+        assert_eq!(executor.math_backend(), CpuMathBackend::AppleAccelerate);
         let mut output = [0.0; 3];
         executor
             .math_backend()
@@ -237,6 +338,33 @@ mod tests {
         for (&observed, exponent) in output.iter().zip([-1.0_f64, 0.0, 1.0]) {
             assert!(observed.to_bits().abs_diff(exponent.exp().to_bits()) <= 1);
         }
+    }
+
+    #[test]
+    fn polynomial_moments_validate_operands_before_dispatch() {
+        let mut scratch = [7.0; 2];
+        assert_eq!(
+            CpuMathBackend::RustStdF64.polynomial_moments_f64(
+                &[1.0, 2.0],
+                &[3.0],
+                &[4.0, 5.0],
+                &mut scratch,
+            ),
+            Err(CpuMathError::OperandLengthMismatch {
+                operation: "polynomial_moments_f64",
+                operand: "responses",
+                expected: 2,
+                observed: 1,
+            })
+        );
+        assert_eq!(scratch.map(f64::to_bits), [7.0, 7.0].map(f64::to_bits));
+
+        assert_eq!(
+            CpuMathBackend::RustStdF64
+                .polynomial_moments_f64(&[0.5, 1.5], &[2.0, 3.0], &[-1.0, 2.0], &mut scratch,)
+                .unwrap(),
+            (5.0, 4.0, 6.5),
+        );
     }
 
     #[test]

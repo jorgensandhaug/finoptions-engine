@@ -180,7 +180,7 @@ impl GbmPathPlan {
     ) -> Result<SimulatedPaths, SimulationError> {
         match math_backend {
             CpuMathBackend::RustStdF64 => self.simulate(initial_spot, paths, normals),
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 self.simulate_vector_exp(math_backend, initial_spot, paths, normals, false)
             }
         }
@@ -230,7 +230,7 @@ impl GbmPathPlan {
     ) -> Result<SimulatedPaths, SimulationError> {
         match math_backend {
             CpuMathBackend::RustStdF64 => self.simulate_parallel(initial_spot, paths, normals),
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 self.simulate_vector_exp(math_backend, initial_spot, paths, normals, true)
             }
         }
@@ -738,7 +738,7 @@ impl EscrowedGbmPathPlan {
     ) -> Result<SimulatedPaths, SimulationError> {
         match math_backend {
             CpuMathBackend::RustStdF64 => self.simulate_parallel(initial_spot, paths, normals),
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
                 let simulated = self
                     .risky_prepaid_forward
@@ -779,7 +779,7 @@ impl EscrowedGbmPathPlan {
             CpuMathBackend::RustStdF64 => {
                 self.simulate_seeded_parallel(initial_spot, paths, stream)
             }
-            CpuMathBackend::AppleAccelerateVforce => {
+            CpuMathBackend::AppleAccelerate => {
                 let initial_prepaid_forward = self.initial_prepaid_forward(initial_spot)?;
                 let simulated = self
                     .risky_prepaid_forward

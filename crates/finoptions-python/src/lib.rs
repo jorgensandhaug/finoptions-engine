@@ -75,9 +75,9 @@ impl NativeCpuExecutor {
 fn parse_cpu_math_backend(value: &str) -> PyResult<CoreCpuMathBackend> {
     match value {
         "rust_std_f64" => Ok(CoreCpuMathBackend::RustStdF64),
-        "apple_accelerate_vforce" => Ok(CoreCpuMathBackend::AppleAccelerateVforce),
+        "apple_accelerate" => Ok(CoreCpuMathBackend::AppleAccelerate),
         _ => Err(InputError::new_err(format!(
-            "CPU math backend must be 'rust_std_f64' or 'apple_accelerate_vforce'; observed {value:?}"
+            "CPU math backend must be 'rust_std_f64' or 'apple_accelerate'; observed {value:?}"
         ))),
     }
 }
