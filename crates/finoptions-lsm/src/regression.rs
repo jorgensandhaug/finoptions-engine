@@ -1059,9 +1059,11 @@ mod tests {
     #[test]
     fn summarized_population_is_bitwise_equal_to_full_validation_for_every_degree_and_backend() {
         let (predictors, responses) = representative_population(500);
-        let mut backends = vec![CpuMathBackend::RustStdF64];
-        #[cfg(target_os = "macos")]
-        backends.push(CpuMathBackend::AppleAccelerate);
+        let backends = [
+            CpuMathBackend::RustStdF64,
+            #[cfg(target_os = "macos")]
+            CpuMathBackend::AppleAccelerate,
+        ];
 
         for degree in 0..=MAX_POLYNOMIAL_DEGREE {
             let spec = spec(degree, 1.0e8);
