@@ -46,7 +46,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Rust tests
-        run: cargo test --workspace --all-targets
+        run: |
+          cargo test --workspace --all-features --exclude finoptions-python --lib --bins --tests --examples
+          cargo test -p finoptions-python --no-default-features --lib
+          cargo test --workspace --all-features --doc --exclude finoptions-python
 
       - name: Python format and lint
         run: |
@@ -54,7 +57,7 @@ jobs:
           uv run --no-sync ruff check .
 
       - name: Python strict types
-        run: uv run --no-sync ty check --error-on-warning python tests
+        run: uv run --no-sync ty check --error-on-warning python tests benchmarks
 
       - name: Build native development package
         run: uv run --no-sync maturin develop --profile dev-fast
