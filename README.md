@@ -110,6 +110,10 @@ The adapter never collects a `LazyFrame`, casts a financial column, guesses a gr
 inside a chunk-dependent dataframe UDF. Cash schedules use paired `List(Float64)` columns and an
 explicit zero-copy or rechunk policy.
 
+Grouped pricing uses `prepare_lsm_strike_groups`: one compact state frame, one row-ordered strike
+frame, and caller-declared `UInt32` group offsets. It therefore simulates each state once without
+duplicating state columns or inferring groups from floating-point equality.
+
 Measure lazy projection, explicit collection and strict native preparation independently on a
 synthetic project-scale frame:
 

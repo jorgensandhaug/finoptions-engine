@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from typing import cast
 
 import numpy as np
@@ -20,20 +21,25 @@ from finoptions import (
     RandomStream,
     UniformExerciseMesh,
     price_lsm_call_batch,
+    price_lsm_call_grouped_batch,
 )
 from finoptions.polars import (
     BufferPolicy,
     CashDividendColumns,
     ContinuousYieldColumn,
     LsmCallColumns,
+    LsmStrikeGroupColumns,
     PolarsAdapterTypeError,
     PolarsBufferError,
     PolarsContentError,
     PolarsSchemaError,
     lsm_result_frame,
     prepare_lsm_call_batch,
+    prepare_lsm_strike_groups,
     price_lsm_call_frame,
+    price_lsm_strike_group_frames,
     select_lsm_call_inputs,
+    select_lsm_strike_group_inputs,
 )
 
 _COLUMNS = LsmCallColumns(
@@ -44,7 +50,15 @@ _COLUMNS = LsmCallColumns(
     volatility="volatility",
 )
 _YIELD = ContinuousYieldColumn("yield")
+_GROUP_COLUMNS = LsmStrikeGroupColumns(
+    initial_spot="spot",
+    maturity="maturity",
+    rate="rate",
+    volatility="volatility",
+)
 _ROWS = 2
+_GROUPS = 2
+_GROUP_ROWS = 3
 _FIRST_ROW_ID = 9
 
 
@@ -68,6 +82,37 @@ def _continuous_frame() -> pl.DataFrame:
             "yield": pl.Float64,
         },
     )
+
+
+def _group_state_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "state_id": [8, 3],
+            "spot": [120.0, 100.0],
+            "maturity": [0.75, 1.0],
+            "rate": [0.03, 0.05],
+            "volatility": [0.30, 0.25],
+            "yield": [0.01, 0.02],
+        },
+        schema_overrides={
+            "spot": pl.Float64,
+            "maturity": pl.Float64,
+            "rate": pl.Float64,
+            "volatility": pl.Float64,
+            "yield": pl.Float64,
+        },
+    )
+
+
+def _group_strike_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {"contract_id": [5, 2, 9], "strike": [110.0, 125.0, 100.0]},
+        schema_overrides={"strike": pl.Float64},
+    )
+
+
+def _group_offsets() -> pl.Series:
+    return pl.Series("group_offsets", [0, 2, 3], dtype=pl.UInt32)
 
 
 def _method() -> Lsm:
@@ -125,6 +170,30 @@ def test_lazy_selection_rejects_wrong_dtype_instead_of_casting() -> None:
         select_lsm_call_inputs(invalid, columns=_COLUMNS, dividends=_YIELD)
 
 
+def test_grouped_lazy_selection_preserves_two_axes_without_grouping_or_sorting() -> None:
+    """The compact state and strike plans retain their independent declared row orders."""
+    states, strikes = select_lsm_strike_group_inputs(
+        _group_state_frame().lazy(),
+        _group_strike_frame().lazy(),
+        state_columns=_GROUP_COLUMNS,
+        strike_column="strike",
+        dividends=_YIELD,
+    )
+
+    assert states.collect_schema() == pl.Schema(
+        {
+            "spot": pl.Float64,
+            "maturity": pl.Float64,
+            "rate": pl.Float64,
+            "volatility": pl.Float64,
+            "yield": pl.Float64,
+        }
+    )
+    assert strikes.collect_schema() == pl.Schema({"strike": pl.Float64})
+    assert states.collect().get_column("spot").to_list() == [120.0, 100.0]
+    assert strikes.collect().get_column("strike").to_list() == [110.0, 125.0, 100.0]
+
+
 def test_eager_boundary_rejects_lazy_frame_explicitly() -> None:
     """Stateful pricing requires the caller to own the collection boundary."""
     with pytest.raises(PolarsAdapterTypeError, match=r"materialized polars.DataFrame"):
@@ -160,6 +229,126 @@ def test_continuous_frame_pricing_matches_direct_native_batch_bitwise() -> None:
         assert np.array_equal(getattr(adapted, column), getattr(direct, column))
 
 
+def test_grouped_frame_pricing_matches_direct_native_grouped_batch_bitwise() -> None:
+    """The two-axis adapter changes no group, strike, random, or result identity."""
+    prepared = prepare_lsm_strike_groups(
+        _group_state_frame(),
+        _group_strike_frame(),
+        group_offsets=_group_offsets(),
+        state_columns=_GROUP_COLUMNS,
+        strike_column="strike",
+        dividends=_YIELD,
+    )
+    executor = CpuExecutor(threads=1)
+    method = _method()
+    mesh = _mesh()
+
+    adapted = prepared.price(mesh=mesh, executor=executor, method=method)
+    direct = price_lsm_call_grouped_batch(
+        groups=prepared.native,
+        mesh=mesh,
+        executor=executor,
+        method=method,
+    )
+
+    assert prepared.group_count == _GROUPS
+    assert prepared.rows == _GROUP_ROWS
+    np.testing.assert_array_equal(
+        prepared.native.group_offsets,
+        np.array([0, 2, 3], dtype=np.uint32),
+    )
+    np.testing.assert_array_equal(prepared.native.initial_spots, np.array([120.0, 100.0]))
+    np.testing.assert_array_equal(prepared.native.strikes, np.array([110.0, 125.0, 100.0]))
+    for column in adapted.__dataclass_fields__:
+        assert np.array_equal(getattr(adapted, column), getattr(direct, column))
+
+
+def test_grouped_frame_requires_exact_explicit_uint32_boundaries() -> None:
+    """The adapter rejects casts, missing boundaries, and empty groups instead of repairing them."""
+    with pytest.raises(PolarsSchemaError, match=r"group_offsets.*UInt32.*UInt64"):
+        prepare_lsm_strike_groups(
+            _group_state_frame(),
+            _group_strike_frame(),
+            group_offsets=pl.Series([0, 2, 3], dtype=pl.UInt64),
+            state_columns=_GROUP_COLUMNS,
+            strike_column="strike",
+            dividends=_YIELD,
+        )
+    with pytest.raises(PolarsContentError, match="group_offset_count_mismatch"):
+        prepare_lsm_strike_groups(
+            _group_state_frame(),
+            _group_strike_frame(),
+            group_offsets=pl.Series([0, 3], dtype=pl.UInt32),
+            state_columns=_GROUP_COLUMNS,
+            strike_column="strike",
+            dividends=_YIELD,
+        )
+    with pytest.raises(PolarsContentError, match="empty_or_reversed_groups"):
+        prepare_lsm_strike_groups(
+            _group_state_frame(),
+            _group_strike_frame(),
+            group_offsets=pl.Series([0, 0, 3], dtype=pl.UInt32),
+            state_columns=_GROUP_COLUMNS,
+            strike_column="strike",
+            dividends=_YIELD,
+        )
+
+
+def test_grouped_offsets_require_explicit_rechunk_policy() -> None:
+    """Fragmented compact boundaries cannot allocate unless the caller permits consolidation."""
+    offsets = pl.concat(
+        (
+            pl.Series("group_offsets", [0, 2], dtype=pl.UInt32),
+            pl.Series("group_offsets", [3], dtype=pl.UInt32),
+        ),
+        rechunk=False,
+    )
+    with pytest.raises(PolarsBufferError, match=r"group_offsets.*explicit rechunk"):
+        prepare_lsm_strike_groups(
+            _group_state_frame(),
+            _group_strike_frame(),
+            group_offsets=offsets,
+            state_columns=_GROUP_COLUMNS,
+            strike_column="strike",
+            dividends=_YIELD,
+        )
+    prepared = prepare_lsm_strike_groups(
+        _group_state_frame(),
+        _group_strike_frame(),
+        group_offsets=offsets,
+        state_columns=_GROUP_COLUMNS,
+        strike_column="strike",
+        dividends=_YIELD,
+        buffer_policy=BufferPolicy.ALLOW_RECHUNK,
+    )
+
+    np.testing.assert_array_equal(
+        prepared.native.group_offsets,
+        np.array([0, 2, 3], dtype=np.uint32),
+    )
+
+
+def test_prepared_grouped_request_retains_borrowed_polars_storage() -> None:
+    """Deleting caller frames cannot invalidate arrays retained by the prepared native facade."""
+    states = _group_state_frame()
+    strikes = _group_strike_frame()
+    offsets = _group_offsets()
+    prepared = prepare_lsm_strike_groups(
+        states,
+        strikes,
+        group_offsets=offsets,
+        state_columns=_GROUP_COLUMNS,
+        strike_column="strike",
+        dividends=_YIELD,
+    )
+
+    del states, strikes, offsets
+    gc.collect()
+
+    np.testing.assert_array_equal(prepared.native.initial_spots, np.array([120.0, 100.0]))
+    np.testing.assert_array_equal(prepared.native.strikes, np.array([110.0, 125.0, 100.0]))
+
+
 def test_convenience_pricing_returns_every_row_aligned_diagnostic() -> None:
     """The concise frame API returns every native diagnostic in stable row order."""
     result = price_lsm_call_frame(
@@ -186,6 +375,23 @@ def test_convenience_pricing_returns_every_row_aligned_diagnostic() -> None:
         "early_exercise_paths",
         "expiry_paths",
     ]
+
+
+def test_grouped_convenience_pricing_returns_strike_aligned_diagnostics() -> None:
+    """The grouped convenience API emits one complete result row per declared strike row."""
+    result = price_lsm_strike_group_frames(
+        _group_state_frame(),
+        _group_strike_frame(),
+        group_offsets=_group_offsets(),
+        state_columns=_GROUP_COLUMNS,
+        strike_column="strike",
+        dividends=_YIELD,
+        mesh=_mesh(),
+        executor=CpuExecutor(threads=1),
+        method=_method(),
+    )
+
+    assert result.shape == (_GROUP_ROWS, 12)
 
 
 def test_cash_lists_preserve_empty_rows_offsets_and_event_order() -> None:

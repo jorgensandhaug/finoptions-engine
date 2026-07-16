@@ -17,7 +17,9 @@ from .batch_lsm import (
     EscrowedCashDividendBatch,
     EscrowedVolatilityConvention,
     LsmBatchResult,
+    LsmStrikeGroups,
     price_lsm_call_batch,
+    price_lsm_call_grouped_batch,
 )
 from .dividends import MaturityBoundary, RaggedCashDividends
 from .model import DividendPolicy
@@ -29,9 +31,11 @@ if TYPE_CHECKING:
 
 Float64Vector = npt.NDArray[np.float64]
 Int64Vector = npt.NDArray[np.int64]
+UInt32Vector = npt.NDArray[np.uint32]
 PolarsDataType = type[pl.DataType] | pl.DataType
 
 _FLOAT64: Final = np.dtype(np.float64)
+_UINT32: Final = np.dtype(np.uint32)
 _RESULT_COLUMNS: Final = (
     "prices",
     "sample_standard_deviations",
@@ -152,6 +156,38 @@ class LsmCallColumns:
 
 
 @dataclass(frozen=True, slots=True)
+class LsmStrikeGroupColumns:
+    """Exact state-column names for explicitly bounded strike groups."""
+
+    initial_spot: str
+    maturity: str
+    rate: str
+    volatility: str
+
+    def __post_init__(self) -> None:
+        """Require four distinct, explicit, nonempty state columns."""
+        names = tuple(
+            _require_column_name(value, field=field)
+            for field, value in (
+                ("initial_spot", self.initial_spot),
+                ("maturity", self.maturity),
+                ("rate", self.rate),
+                ("volatility", self.volatility),
+            )
+        )
+        if len(set(names)) != len(names):
+            raise PolarsAdapterTypeError(
+                field="LSM strike-group state columns",
+                observed=repr(names),
+                expected="four distinct column names",
+            )
+
+    def ordered(self) -> tuple[str, str, str, str]:
+        """Return the stable native state argument order."""
+        return (self.initial_spot, self.maturity, self.rate, self.volatility)
+
+
+@dataclass(frozen=True, slots=True)
 class ContinuousYieldColumn:
     """One Float64 continuously compounded annual dividend-yield column."""
 
@@ -268,6 +304,47 @@ class PreparedLsmCallBatch:
         )
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class PreparedLsmStrikeGroups:
+    """Complete compact grouped request borrowed from two materialized Polars axes."""
+
+    native: LsmStrikeGroups
+
+    def __post_init__(self) -> None:
+        """Reject construction around anything except the exact native facade."""
+        if type(self.native) is not LsmStrikeGroups:
+            raise PolarsAdapterTypeError(
+                field="native",
+                observed=type(self.native).__name__,
+                expected="LsmStrikeGroups",
+            )
+
+    @property
+    def group_count(self) -> int:
+        """Return the independently simulated state count."""
+        return int(self.native.initial_spots.size)
+
+    @property
+    def rows(self) -> int:
+        """Return the preserved strike-row count."""
+        return int(self.native.strikes.size)
+
+    def price(
+        self,
+        *,
+        mesh: ExerciseMesh,
+        executor: CpuExecutor,
+        method: Lsm,
+    ) -> LsmBatchResult:
+        """Execute the grouped native estimator without changing either source axis."""
+        return price_lsm_call_grouped_batch(
+            groups=self.native,
+            mesh=mesh,
+            executor=executor,
+            method=method,
+        )
+
+
 def select_lsm_call_inputs(
     frame: pl.LazyFrame,
     *,
@@ -283,6 +360,35 @@ def select_lsm_call_inputs(
     expected = _expected_schema(columns, dividends)
     _validate_schema(frame.collect_schema(), expected)
     return frame.select(*expected)
+
+
+def select_lsm_strike_group_inputs(
+    state_frame: pl.LazyFrame,
+    strike_frame: pl.LazyFrame,
+    *,
+    state_columns: LsmStrikeGroupColumns,
+    strike_column: str,
+    dividends: DividendColumns,
+) -> tuple[pl.LazyFrame, pl.LazyFrame]:
+    """Project the two exact grouped-pricing axes while keeping both queries lazy.
+
+    The caller remains responsible for constructing explicit group offsets and collecting both
+    axes. This function never joins, groups, sorts, casts, collects, or infers state equality.
+    """
+    _validate_group_lazy_request(
+        state_frame,
+        strike_frame,
+        state_columns,
+        strike_column,
+        dividends,
+    )
+    state_schema = _expected_group_state_schema(state_columns, dividends)
+    strike_schema: dict[str, PolarsDataType] = {
+        _require_column_name(strike_column, field="strike_column"): pl.Float64
+    }
+    _validate_schema(state_frame.collect_schema(), state_schema)
+    _validate_schema(strike_frame.collect_schema(), strike_schema)
+    return state_frame.select(*state_schema), strike_frame.select(*strike_schema)
 
 
 def prepare_lsm_call_batch(
@@ -318,6 +424,73 @@ def prepare_lsm_call_batch(
     )
 
 
+def prepare_lsm_strike_groups(  # noqa: PLR0913 - every compact axis is explicit
+    state_frame: pl.DataFrame,
+    strike_frame: pl.DataFrame,
+    *,
+    group_offsets: pl.Series,
+    state_columns: LsmStrikeGroupColumns,
+    strike_column: str,
+    dividends: DividendColumns,
+    buffer_policy: BufferPolicy = BufferPolicy.REQUIRE_ZERO_COPY,
+) -> PreparedLsmStrikeGroups:
+    """Borrow explicit compact state, strike, and offset axes as one grouped LSM request.
+
+    `state_frame` has one row per independently simulated market state. `strike_frame` has one row
+    per output contract. `group_offsets` are exact contiguous boundaries into the strike axis and
+    must contain one more value than the state-row count. No equality, grouping, sorting, casting,
+    repair, or row removal is performed.
+    """
+    strike_name = _validate_group_eager_request(
+        state_frame,
+        strike_frame,
+        group_offsets,
+        state_columns,
+        strike_column,
+        dividends,
+        buffer_policy,
+    )
+    violations: list[tuple[str, int]] = []
+    if state_frame.height == 0:
+        violations.append(("empty_state_frame", 1))
+    if strike_frame.height == 0:
+        violations.append(("empty_strike_frame", 1))
+    if violations:
+        raise PolarsContentError(violations=tuple(violations))
+
+    state_schema = _expected_group_state_schema(state_columns, dividends)
+    strike_schema: dict[str, PolarsDataType] = {strike_name: pl.Float64}
+    _validate_schema(state_frame.schema, state_schema)
+    _validate_schema(strike_frame.schema, strike_schema)
+    offsets = _uint32_vector(group_offsets, column="group_offsets", policy=buffer_policy)
+    _validate_group_offsets(
+        offsets,
+        expected_groups=state_frame.height,
+        expected_rows=strike_frame.height,
+    )
+    state_vectors = tuple(
+        _float64_vector(state_frame.get_column(name), column=name, policy=buffer_policy)
+        for name in state_columns.ordered()
+    )
+    strikes = _float64_vector(
+        strike_frame.get_column(strike_name),
+        column=strike_name,
+        policy=buffer_policy,
+    )
+    prepared_dividends = _prepare_dividends(state_frame, dividends, buffer_policy)
+    return PreparedLsmStrikeGroups(
+        native=LsmStrikeGroups(
+            group_offsets=offsets,
+            initial_spots=state_vectors[0],
+            strikes=strikes,
+            maturities=state_vectors[1],
+            rates=state_vectors[2],
+            volatilities=state_vectors[3],
+            dividends=prepared_dividends,
+        )
+    )
+
+
 def price_lsm_call_frame(  # noqa: PLR0913 - every execution contract remains explicit
     frame: pl.DataFrame,
     *,
@@ -332,6 +505,32 @@ def price_lsm_call_frame(  # noqa: PLR0913 - every execution contract remains ex
     prepared = prepare_lsm_call_batch(
         frame,
         columns=columns,
+        dividends=dividends,
+        buffer_policy=buffer_policy,
+    )
+    return lsm_result_frame(prepared.price(mesh=mesh, executor=executor, method=method))
+
+
+def price_lsm_strike_group_frames(  # noqa: PLR0913 - every axis and convention is explicit
+    state_frame: pl.DataFrame,
+    strike_frame: pl.DataFrame,
+    *,
+    group_offsets: pl.Series,
+    state_columns: LsmStrikeGroupColumns,
+    strike_column: str,
+    dividends: DividendColumns,
+    mesh: ExerciseMesh,
+    executor: CpuExecutor,
+    method: Lsm,
+    buffer_policy: BufferPolicy = BufferPolicy.REQUIRE_ZERO_COPY,
+) -> pl.DataFrame:
+    """Price explicit compact strike groups and return row-aligned native diagnostics."""
+    prepared = prepare_lsm_strike_groups(
+        state_frame,
+        strike_frame,
+        group_offsets=group_offsets,
+        state_columns=state_columns,
+        strike_column=strike_column,
         dividends=dividends,
         buffer_policy=buffer_policy,
     )
@@ -386,6 +585,65 @@ def _validate_eager_request(
         )
 
 
+def _validate_group_lazy_request(
+    state_frame: object,
+    strike_frame: object,
+    state_columns: object,
+    strike_column: object,
+    dividends: object,
+) -> None:
+    if type(state_frame) is not pl.LazyFrame:
+        raise PolarsAdapterTypeError(
+            field="state_frame",
+            observed=type(state_frame).__name__,
+            expected="polars.LazyFrame",
+        )
+    if type(strike_frame) is not pl.LazyFrame:
+        raise PolarsAdapterTypeError(
+            field="strike_frame",
+            observed=type(strike_frame).__name__,
+            expected="polars.LazyFrame",
+        )
+    _validate_group_specs(state_columns, strike_column, dividends)
+
+
+def _validate_group_eager_request(  # noqa: PLR0913 - validates one explicit public contract
+    state_frame: object,
+    strike_frame: object,
+    group_offsets: object,
+    state_columns: object,
+    strike_column: object,
+    dividends: object,
+    buffer_policy: object,
+) -> str:
+    if type(state_frame) is not pl.DataFrame:
+        raise PolarsAdapterTypeError(
+            field="state_frame",
+            observed=type(state_frame).__name__,
+            expected="a materialized polars.DataFrame",
+        )
+    if type(strike_frame) is not pl.DataFrame:
+        raise PolarsAdapterTypeError(
+            field="strike_frame",
+            observed=type(strike_frame).__name__,
+            expected="a materialized polars.DataFrame",
+        )
+    if type(group_offsets) is not pl.Series:
+        raise PolarsAdapterTypeError(
+            field="group_offsets",
+            observed=type(group_offsets).__name__,
+            expected="a materialized polars.Series",
+        )
+    strike_name = _validate_group_specs(state_columns, strike_column, dividends)
+    if type(buffer_policy) is not BufferPolicy:
+        raise PolarsAdapterTypeError(
+            field="buffer_policy",
+            observed=type(buffer_policy).__name__,
+            expected="BufferPolicy",
+        )
+    return strike_name
+
+
 def _validate_specs(columns: object, dividends: object) -> None:
     if type(columns) is not LsmCallColumns:
         raise PolarsAdapterTypeError(
@@ -413,8 +671,55 @@ def _validate_specs(columns: object, dividends: object) -> None:
         )
 
 
+def _validate_group_specs(
+    state_columns: object,
+    strike_column: object,
+    dividends: object,
+) -> str:
+    if type(state_columns) is not LsmStrikeGroupColumns:
+        raise PolarsAdapterTypeError(
+            field="state_columns",
+            observed=type(state_columns).__name__,
+            expected="LsmStrikeGroupColumns",
+        )
+    strike_name = _require_column_name(strike_column, field="strike_column")
+    if type(dividends) not in (
+        ContinuousYieldColumn,
+        CashDividendColumns,
+        EscrowedCashDividendColumns,
+    ):
+        raise PolarsAdapterTypeError(
+            field="dividends",
+            observed=type(dividends).__name__,
+            expected=("ContinuousYieldColumn, CashDividendColumns, or EscrowedCashDividendColumns"),
+        )
+    typed_columns = state_columns
+    typed_dividends = cast("DividendColumns", dividends)
+    overlap = set(typed_columns.ordered()) & set(_dividend_column_names(typed_dividends))
+    if overlap:
+        raise PolarsAdapterTypeError(
+            field="group-state columns",
+            observed=repr(tuple(sorted(overlap))),
+            expected="distinct state and dividend columns",
+        )
+    return strike_name
+
+
 def _expected_schema(
     columns: LsmCallColumns,
+    dividends: DividendColumns,
+) -> dict[str, PolarsDataType]:
+    expected: dict[str, PolarsDataType] = dict.fromkeys(columns.ordered(), pl.Float64)
+    if isinstance(dividends, ContinuousYieldColumn):
+        expected[dividends.annualized_decimals] = pl.Float64
+    else:
+        expected[dividends.times] = pl.List(pl.Float64)
+        expected[dividends.amounts] = pl.List(pl.Float64)
+    return expected
+
+
+def _expected_group_state_schema(
+    columns: LsmStrikeGroupColumns,
     dividends: DividendColumns,
 ) -> dict[str, PolarsDataType]:
     expected: dict[str, PolarsDataType] = dict.fromkeys(columns.ordered(), pl.Float64)
@@ -479,6 +784,65 @@ def _float64_vector(
             expected="a C-contiguous Float64 vector",
         )
     return result
+
+
+def _uint32_vector(
+    series: pl.Series,
+    *,
+    column: str,
+    policy: BufferPolicy,
+) -> UInt32Vector:
+    if series.dtype != pl.UInt32:
+        raise PolarsSchemaError(
+            missing=(),
+            mismatches=((column, str(pl.UInt32), str(series.dtype)),),
+        )
+    if series.null_count() != 0:
+        raise PolarsContentError(violations=((f"null_{column}", series.null_count()),))
+    candidate = _single_chunk(series, column=column, policy=policy)
+    try:
+        converted = candidate.to_numpy(writable=False, allow_copy=False)
+    except RuntimeError as error:
+        raise PolarsBufferError(
+            column=column,
+            policy=policy,
+            reason="UInt32 storage cannot be borrowed by NumPy after the declared policy",
+        ) from error
+    result = cast("UInt32Vector", converted)
+    if (
+        type(result) is not np.ndarray
+        or result.dtype != _UINT32
+        or result.ndim != 1
+        or not result.flags.c_contiguous
+    ):
+        raise PolarsAdapterTypeError(
+            field=column,
+            observed=(
+                f"{type(result).__name__}, {getattr(result, 'dtype', None)}, "
+                f"{getattr(result, 'shape', None)}"
+            ),
+            expected="a C-contiguous UInt32 vector",
+        )
+    return result
+
+
+def _validate_group_offsets(
+    offsets: UInt32Vector,
+    *,
+    expected_groups: int,
+    expected_rows: int,
+) -> None:
+    violations: list[tuple[str, int]] = []
+    if offsets.size != expected_groups + 1:
+        violations.append(("group_offset_count_mismatch", 1))
+    if offsets.size == 0 or int(offsets[0]) != 0 or int(offsets[-1]) != expected_rows:
+        violations.append(("group_offset_boundary_mismatch", 1))
+    if offsets.size > 1:
+        invalid_boundaries = int(np.count_nonzero(offsets[1:] <= offsets[:-1]))
+        if invalid_boundaries:
+            violations.append(("empty_or_reversed_groups", invalid_boundaries))
+    if violations:
+        raise PolarsContentError(violations=tuple(violations))
 
 
 def _single_chunk(series: pl.Series, *, column: str, policy: BufferPolicy) -> pl.Series:
@@ -575,13 +939,18 @@ __all__ = [
     "DividendColumns",
     "EscrowedCashDividendColumns",
     "LsmCallColumns",
+    "LsmStrikeGroupColumns",
     "PolarsAdapterTypeError",
     "PolarsBufferError",
     "PolarsContentError",
     "PolarsSchemaError",
     "PreparedLsmCallBatch",
+    "PreparedLsmStrikeGroups",
     "lsm_result_frame",
     "prepare_lsm_call_batch",
+    "prepare_lsm_strike_groups",
     "price_lsm_call_frame",
+    "price_lsm_strike_group_frames",
     "select_lsm_call_inputs",
+    "select_lsm_strike_group_inputs",
 ]

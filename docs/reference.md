@@ -361,5 +361,11 @@ training are deliberately not expression plugins or `map_batches` callbacks beca
 chunking does not preserve groups, random domains, or fitting populations. [ADR 0021](adr/0021-polars-stateful-model-boundary.md)
 records the complete decision.
 
+For many strikes sharing a market state, `select_lsm_strike_group_inputs` projects two lazy axes:
+one state row per simulation and one row per strike. After explicit collection,
+`prepare_lsm_strike_groups` accepts those two frames plus exact `UInt32` offsets into the strike
+axis. It never derives a group from repeated values or silently sorts either axis, and compact state
+and dividend buffers are not repeated per strike.
+
 The repository is private, not yet licensed for redistribution, and no package publication is
 authorized.

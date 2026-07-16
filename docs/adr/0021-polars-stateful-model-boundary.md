@@ -39,6 +39,12 @@ requires an explicit caller policy. Results preserve the declared source-row ord
 separate, typed result table that can be joined only by an explicit stable identity or verified
 row-order contract.
 
+Grouped pricing has two explicit materialized axes. One state table contains exactly one row per
+independently simulated market state, a second strike table contains one row per output contract,
+and a caller-supplied `UInt32` offset vector maps states to contiguous strike ranges. The adapter
+does not repeat state columns per strike or infer groups from value equality, keys, sorting, or
+dataframe partitioning.
+
 LSM, simulation, calibration, bootstrap, and neural training are never exposed as elementwise
 plugins or streamable batch UDFs. A non-streamable `map_batches` wrapper is also rejected: it hides
 the important execution boundary, obstructs resource and failure control, and cannot improve
