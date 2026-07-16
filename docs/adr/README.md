@@ -1,0 +1,26 @@
+# Architecture decisions
+
+These records define the financial, numerical, data-layout, and execution decisions implemented by
+the engine.
+
+- [ADR 0001: Explicit financial inputs](0001-explicit-financial-inputs.md)
+- [ADR 0002: Exact GBM step](0002-exact-gbm-step.md)
+- [ADR 0003: Event-aligned path storage](0003-event-aligned-path-storage.md)
+- [ADR 0004: Explicit random streams](0004-explicit-random-streams.md)
+- [ADR 0005: Checked low-degree polynomial regression](0005-checked-low-degree-polynomial-regression.md)
+- [ADR 0006: Independently fitted and evaluated call LSM](0006-independent-policy-lsm.md)
+- [ADR 0007: Shared explicit CPU runtime](0007-shared-explicit-cpu-runtime.md)
+- [ADR 0008: Ragged cash-dividend model tensors](0008-ragged-cash-dividend-tensors.md)
+- [ADR 0009: Explicit integrated continuous dividend yield](0009-explicit-continuous-dividend-yield.md)
+- [ADR 0010: Contract-parallel independent-policy LSM batches](0010-contract-parallel-lsm-batches.md)
+- [ADR 0011: Explicit escrowed cash-dividend approximation](0011-explicit-escrowed-cash-dividends.md)
+- [ADR 0012: Explicit Apple vector-math backend](0012-explicit-apple-vector-math.md)
+- [ADR 0013: Group-addressed strike LSM with shared path populations](0013-group-addressed-strike-lsm.md)
+- [ADR 0014: Terminal cash-event order](0014-terminal-cash-event-order.md)
+- [ADR 0015: Explicit insufficient-exercise-support policy](0015-explicit-insufficient-exercise-support.md)
+- [ADR 0016: Explicit cash-dividend-date exercise mesh](0016-cash-dividend-date-exercise-mesh.md)
+- [ADR 0017: Event-aligned direct quadrature](0017-event-aligned-direct-quadrature.md)
+- [ADR 0018: Exact row-aligned exercise-time batches](0018-exact-row-aligned-exercise-times.md)
+- [ADR 0019: Grouped continuous-yield American calls](0019-grouped-continuous-yield-american-calls.md)
+- [ADR 0020: Additive-panel stationary bootstrap](0020-additive-panel-stationary-bootstrap.md)
+- [ADR 0021: Polars lazy-plan and stateful-model boundary](0021-polars-stateful-model-boundary.md)

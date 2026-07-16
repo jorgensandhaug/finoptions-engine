@@ -1,0 +1,65 @@
+[workspace]
+members = [
+  "crates/finoptions-accelerate",
+  "crates/finoptions-american",
+  "crates/finoptions-batch",
+  "crates/finoptions-core",
+  "crates/finoptions-lsm",
+  "crates/finoptions-python",
+  "crates/finoptions-quadrature",
+  "crates/finoptions-runtime",
+  "crates/finoptions-sim",
+  "crates/finoptions-testkit",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Jørgen Sandhaug"]
+edition = "2024"
+rust-version = "1.97"
+repository = "https://github.com/jorgensandhaug/finoptions-engine"
+license-file = "LICENSE"
+
+[workspace.dependencies]
+blake3 = { version = "1.8.5", default-features = false, features = ["std"] }
+criterion = { version = "0.8.2", default-features = false }
+finoptions-accelerate = { path = "crates/finoptions-accelerate", version = "0.1.0" }
+finoptions-american = { path = "crates/finoptions-american", version = "0.1.0" }
+finoptions-batch = { path = "crates/finoptions-batch", version = "0.1.0" }
+finoptions-core = { path = "crates/finoptions-core", version = "0.1.0" }
+finoptions-lsm = { path = "crates/finoptions-lsm", version = "0.1.0" }
+finoptions-quadrature = { path = "crates/finoptions-quadrature", version = "0.1.0" }
+finoptions-runtime = { path = "crates/finoptions-runtime", version = "0.1.0" }
+finoptions-sim = { path = "crates/finoptions-sim", version = "0.1.0" }
+finoptions-testkit = { path = "crates/finoptions-testkit", version = "0.1.0" }
+ndarray = "0.17.2"
+nalgebra = { version = "0.35.0", default-features = false, features = ["std"] }
+libm = "0.2.16"
+numpy = "0.29.0"
+pyo3 = "0.29.0"
+rayon = "1.12.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+debug = "line-tables-only"
+incremental = true
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+inherits = "release"

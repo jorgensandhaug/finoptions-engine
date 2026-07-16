@@ -1,0 +1,25 @@
+[package]
+name = "finoptions-batch"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Validated ragged financial-event batches and model tensor kernels"
+publish = false
+
+[dependencies]
+finoptions-runtime.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "dividend_tensors"
+harness = false
+
+[lints]
+workspace = true

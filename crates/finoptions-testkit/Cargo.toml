@@ -1,0 +1,18 @@
+[package]
+name = "finoptions-testkit"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Independent fixtures and validation helpers for finoptions-engine"
+publish = false
+
+[dependencies]
+finoptions-core.workspace = true
+libm.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

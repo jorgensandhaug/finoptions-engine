@@ -1,0 +1,27 @@
+[package]
+name = "finoptions-sim"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Event-aligned simulation primitives for finoptions-engine"
+publish = false
+
+[dependencies]
+finoptions-core.workspace = true
+finoptions-runtime.workspace = true
+libm.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "gbm_paths"
+harness = false
+
+[lints]
+workspace = true

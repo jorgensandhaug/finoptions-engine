@@ -1,0 +1,41 @@
+[package]
+name = "finoptions-lsm"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Independently fitted and evaluated LSM for finoptions-engine"
+publish = false
+
+[features]
+bench-internals = []
+
+[dependencies]
+blake3.workspace = true
+finoptions-batch.workspace = true
+finoptions-core.workspace = true
+finoptions-sim.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+nalgebra.workspace = true
+
+[[bench]]
+name = "polynomial_regression"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "lsm_call"
+harness = false
+
+[[bench]]
+name = "lsm_batch"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "finoptions-american"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Deterministic American-option methods for finoptions-engine"
+publish = false
+
+[dependencies]
+finoptions-runtime.workspace = true
+libm.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+finoptions-core.workspace = true
+finoptions-testkit.workspace = true
+
+[lints]
+workspace = true

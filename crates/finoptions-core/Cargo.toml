@@ -1,0 +1,17 @@
+[package]
+name = "finoptions-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Validated financial types and event semantics for finoptions-engine"
+publish = false
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

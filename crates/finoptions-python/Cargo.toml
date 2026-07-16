@@ -1,0 +1,33 @@
+[package]
+name = "finoptions-python"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "PyO3 extension for the finoptions Python package"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+finoptions-american.workspace = true
+finoptions-batch.workspace = true
+finoptions-core.workspace = true
+finoptions-lsm.workspace = true
+finoptions-quadrature.workspace = true
+finoptions-runtime.workspace = true
+finoptions-sim.workspace = true
+ndarray.workspace = true
+numpy.workspace = true
+pyo3.workspace = true
+
+[lints]
+workspace = true

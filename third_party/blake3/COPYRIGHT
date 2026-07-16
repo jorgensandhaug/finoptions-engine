@@ -1,0 +1,6 @@
+Copyright 2019 Jack O'Connor and Samuel Neves
+
+BLAKE3 is licensed under the CC0 1.0 Universal license, the Apache
+License 2.0, or the Apache License 2.0 with the LLVM exception, at the
+user's choice. This distribution uses BLAKE3 under Apache License 2.0;
+the full text is packaged at ../rust-random/LICENSE-APACHE.
