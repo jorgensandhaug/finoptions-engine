@@ -120,11 +120,14 @@ synthetic project-scale frame:
 ```shell
 just bench-polars-boundary 1000000 continuous_yield
 just bench-polars-boundary 1000000 cash
+just bench-polars-groups 100000 1000000 continuous_yield
+just bench-polars-groups 100000 1000000 cash
 ```
 
-The benchmark verifies that scalar arrays still borrow the materialized Polars buffers and reports
-cold-path timings, steady-state medians, phase throughput, and incremental process high-water
-memory as canonical JSON.
+The benchmarks verify that scalar arrays and explicit grouped offsets still borrow the materialized
+Polars buffers. They report cold-path timings, steady-state medians, phase throughput, compact native
+request bytes, avoided duplicated state rows, and incremental process high-water memory as canonical
+JSON.
 
 ## Architecture
 

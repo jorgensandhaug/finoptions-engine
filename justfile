@@ -32,5 +32,8 @@ bench-grouped-lsm threads="14" paths="32768" math_backend="rust_std_f64": native
 bench-polars-boundary rows="1000000" dividends="continuous_yield" iterations="6": native
     uv run --no-sync python benchmarks/polars_boundary.py --rows {{rows}} --dividends {{dividends}} --iterations {{iterations}}
 
+bench-polars-groups groups="100000" strike_rows="1000000" dividends="continuous_yield" iterations="6": native
+    uv run --no-sync python benchmarks/polars_grouped_boundary.py --groups {{groups}} --strike-rows {{strike_rows}} --dividends {{dividends}} --iterations {{iterations}}
+
 full: check test
     uv build
