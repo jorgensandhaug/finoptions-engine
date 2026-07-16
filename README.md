@@ -110,6 +110,18 @@ The adapter never collects a `LazyFrame`, casts a financial column, guesses a gr
 inside a chunk-dependent dataframe UDF. Cash schedules use paired `List(Float64)` columns and an
 explicit zero-copy or rechunk policy.
 
+Measure lazy projection, explicit collection and strict native preparation independently on a
+synthetic project-scale frame:
+
+```shell
+just bench-polars-boundary 1000000 continuous_yield
+just bench-polars-boundary 1000000 cash
+```
+
+The benchmark verifies that scalar arrays still borrow the materialized Polars buffers and reports
+cold-path timings, steady-state medians, phase throughput, and incremental process high-water
+memory as canonical JSON.
+
 ## Architecture
 
 - `finoptions-core`: schedules, curves, market inputs, and financial event ordering.
