@@ -577,6 +577,7 @@ pub fn polynomial_recurrence_moments_f64(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     fn compensated_sum(terms: impl IntoIterator<Item = f64>) -> (f64, f64) {
         let mut sum = 0.0;
         let mut correction = 0.0;
@@ -594,6 +595,7 @@ mod tests {
         (sum + correction, absolute_sum)
     }
 
+    #[cfg(target_os = "macos")]
     fn assert_reduction_within_declared_bound(observed: f64, expected: f64, absolute_sum: f64) {
         let tolerance = 128.0 * f64::EPSILON * absolute_sum.max(f64::MIN_POSITIVE);
         assert!(
