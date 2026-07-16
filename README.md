@@ -5,8 +5,8 @@ Python API. Financial semantics, numerical methods, random streams, execution re
 layouts are explicit. Unsupported requests fail before pricing; the engine never substitutes a
 nearby model, mesh, precision, event time, backend, or fallback algorithm.
 
-This repository is private and pre-release. Package publication and redistribution are not yet
-authorized.
+The source is available under the Apache License 2.0. The API is pre-1.0 and may evolve while its
+financial contracts remain explicit and fail-fast.
 
 ## Supported scope
 
@@ -22,7 +22,15 @@ authorized.
 
 The complete method and domain contract is in the [capability reference](docs/reference.md).
 
-## Quick start
+## Install
+
+Install the tagged source directly from GitHub:
+
+```shell
+uv pip install "finoptions-engine[polars] @ git+https://github.com/jorgensandhaug/finoptions-engine.git@v0.1.0"
+```
+
+## Develop
 
 Prerequisites are `uv`, Rust 1.97.0, and `just`.
 

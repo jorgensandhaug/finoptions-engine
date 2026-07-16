@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 license-file.workspace = true
-description = "Private PyO3 extension for the finoptions Python package"
+description = "PyO3 extension for the finoptions Python package"
 publish = false
 
 [lib]

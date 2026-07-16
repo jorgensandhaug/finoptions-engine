@@ -1,8 +1,7 @@
 # Architecture decisions
 
-Concise, approved repository-local decisions will be added as implementation reaches each boundary.
-Private archaeology, discarded alternatives, and raw scientific-audit material remain outside this
-repository.
+These records define the financial, numerical, data-layout, and execution decisions implemented by
+the engine.
 
 - [ADR 0001: Explicit financial inputs](0001-explicit-financial-inputs.md)
 - [ADR 0002: Exact GBM step](0002-exact-gbm-step.md)
