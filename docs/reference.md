@@ -315,5 +315,51 @@ are recorded in [ADR 0013](adr/0013-group-addressed-strike-lsm.md) and the
 The current project-shaped CPU and memory measurements are recorded as a reproducible
 [performance checkpoint](performance/2026-07-14-lsm-batch.md).
 
+## Polars boundary
+
+Install the optional adapter with `uv sync --extra polars`. Stateless scans, joins, filters, and
+feature expressions remain in a `LazyFrame`; pricing starts only after an explicit collection:
+
+```python
+import finoptions.polars as fpl
+
+columns = fpl.LsmCallColumns(
+    initial_spot="spot",
+    strike="strike",
+    maturity="maturity",
+    rate="rate",
+    volatility="volatility",
+)
+dividends = fpl.ContinuousYieldColumn("forecast_yield")
+selected = fpl.select_lsm_call_inputs(
+    lazy_quotes,
+    columns=columns,
+    dividends=dividends,
+)
+materialized = selected.collect()
+result_table = fpl.price_lsm_call_frame(
+    materialized,
+    columns=columns,
+    dividends=dividends,
+    mesh=mesh,
+    executor=executor,
+    method=method,
+)
+```
+
+`select_lsm_call_inputs` resolves and checks the logical schema, projects only the exact model
+columns, and returns another `LazyFrame`; it does not execute the query or insert a UDF. The pricing
+function admits only a materialized `DataFrame`, exact `Float64` scalar columns, and the declared
+buffer policy. It returns a separate row-aligned table containing price, sampling error, stopping
+counts, and all regression-support diagnostics.
+
+Exact and escrowed cash models use `CashDividendColumns` or `EscrowedCashDividendColumns` with
+paired `List(Float64)` event-time and amount columns. `BufferPolicy.REQUIRE_ZERO_COPY` rejects
+fragmented primitive or list storage. `BufferPolicy.ALLOW_RECHUNK` permits only explicit
+consolidation; neither policy casts, sorts, clips, repairs, or removes an event. Stateful pricing and
+training are deliberately not expression plugins or `map_batches` callbacks because arbitrary
+chunking does not preserve groups, random domains, or fitting populations. [ADR 0021](adr/0021-polars-stateful-model-boundary.md)
+records the complete decision.
+
 The repository is private, not yet licensed for redistribution, and no package publication is
 authorized.

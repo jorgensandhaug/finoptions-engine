@@ -24,3 +24,4 @@ repository.
 - [ADR 0018: Exact row-aligned exercise-time batches](0018-exact-row-aligned-exercise-times.md)
 - [ADR 0019: Grouped continuous-yield American calls](0019-grouped-continuous-yield-american-calls.md)
 - [ADR 0020: Additive-panel stationary bootstrap](0020-additive-panel-stationary-bootstrap.md)
+- [ADR 0021: Polars lazy-plan and stateful-model boundary](0021-polars-stateful-model-boundary.md)
