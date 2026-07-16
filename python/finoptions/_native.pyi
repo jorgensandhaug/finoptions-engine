@@ -172,6 +172,16 @@ def stationary_bootstrap_panel_sums_f64(
     domain: int,
     replication_path_start: int,
 ) -> npt.NDArray[np.float64]: ...
+def stationary_bootstrap_stratified_panel_sums_f64(
+    panel_statistics: npt.NDArray[np.float64],
+    stratum_offsets: npt.NDArray[np.uint64],
+    executor: CpuExecutor,
+    replications: int,
+    mean_block_length: float,
+    seed: int,
+    domain: int,
+    replication_path_start: int,
+) -> npt.NDArray[np.float64]: ...
 def price_lsm_call_seeded_f64(
     initial_spot: float,
     strike: float,

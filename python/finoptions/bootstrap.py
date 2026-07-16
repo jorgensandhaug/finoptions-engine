@@ -14,9 +14,11 @@ from .model import InputError
 from .simulation import CpuExecutor, RandomStream
 
 Float64Matrix = npt.NDArray[np.float64]
+UInt64Vector = npt.NDArray[np.uint64]
 BootstrapError = _native.BootstrapError
 _MATRIX_DIMENSIONS: Final = 2
 _MAX_U32: Final = (2**32) - 1
+_MIN_STRATUM_OFFSETS: Final = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,44 @@ class StationaryBootstrap:
         result.flags.writeable = False
         return result
 
+    def sum_stratified_panels(
+        self,
+        panel_statistics: Float64Matrix,
+        stratum_offsets: UInt64Vector,
+        *,
+        executor: CpuExecutor,
+    ) -> Float64Matrix:
+        """Return additive sums while preserving every contiguous stratum's panel count.
+
+        ``stratum_offsets`` must be an immutable-by-contract C-contiguous UInt64 vector of the
+        form ``[0, ..., ordered_panels]`` with strictly increasing values. Circular block origins
+        wrap only inside each declared stratum; every output therefore contains exactly the source
+        number of positions from every stratum. No dtype or layout conversion is implicit.
+
+        Raises:
+            InputError: If matrix, offset, executor, or random-resource contracts are invalid.
+            BootstrapError: If finite input overflows a prefix or resampled sum, or allocation
+                fails.
+
+        """
+        _validate_panel_statistics(panel_statistics)
+        _validate_stratum_offsets(stratum_offsets)
+        if type(executor) is not CpuExecutor:
+            msg = f"executor must be CpuExecutor; observed {type(executor).__name__}"
+            raise InputError(msg)
+        result = _native.stationary_bootstrap_stratified_panel_sums_f64(
+            panel_statistics,
+            stratum_offsets,
+            executor._handle,  # noqa: SLF001 - wrapper owns the private native resource
+            self.replications,
+            self.mean_block_length,
+            self.random_stream.seed,
+            self.random_stream.domain,
+            self.replication_path_start,
+        )
+        result.flags.writeable = False
+        return result
+
 
 def _validate_panel_statistics(values: object) -> None:
     if type(values) is not np.ndarray:
@@ -120,6 +160,22 @@ def _validate_panel_statistics(values: object) -> None:
         raise InputError(msg)
     if not array.flags.c_contiguous:
         msg = "panel_statistics must be C-contiguous; implicit copies are forbidden"
+        raise InputError(msg)
+
+
+def _validate_stratum_offsets(values: object) -> None:
+    if type(values) is not np.ndarray:
+        msg = f"stratum_offsets must be a plain numpy.ndarray; observed {type(values).__name__}"
+        raise InputError(msg)
+    array = cast("UInt64Vector", values)
+    if array.dtype != np.dtype(np.uint64):
+        msg = f"stratum_offsets must have dtype uint64; observed {array.dtype}"
+        raise InputError(msg)
+    if array.ndim != 1 or array.size < _MIN_STRATUM_OFFSETS:
+        msg = f"stratum_offsets must be a one-dimensional partition; observed {array.shape!r}"
+        raise InputError(msg)
+    if not array.flags.c_contiguous:
+        msg = "stratum_offsets must be C-contiguous; implicit copies are forbidden"
         raise InputError(msg)
 
 

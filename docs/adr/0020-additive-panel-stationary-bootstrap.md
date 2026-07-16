@@ -28,6 +28,15 @@ representable open-unit midpoint `(bits + 0.5) / 2^52`; the geometric inverse CD
 `1 + floor(libm::log1p(-u) / libm::log1p(-1/L))`. `L = 1` returns one without consuming a length
 word. The terminal block is truncated to the remaining sequence length.
 
+The same kernel has an explicit contiguous-strata mode. Its UInt64 offsets must form the strictly
+increasing partition `[0, ..., panels]`; empty strata, gaps, overlap, and incomplete coverage fail
+before sampling. Within each replication, strata are visited in declared order using the same path
+stream. Each stratum independently draws circular blocks until it has contributed exactly its
+observed number of panel positions, and circular wrapping is confined to that stratum. This retains
+fixed regime weights without changing the statistic interface or silently inferring strata from
+data values. Adding, deleting, or reordering a stratum changes random-word consumption and is
+therefore part of the request's digital identity.
+
 Inputs are borrowed without conversion. Empty shapes, nonfinite values, overflowing shapes or
 counter ranges, invalid mean lengths, allocation failures, and nonfinite prefix or result sums are
 typed errors. A dedicated `CpuExecutor` parallelizes independent replications; path addressing
@@ -38,6 +47,9 @@ sampler, precision, block rule, or scalar fallback is selected implicitly.
 
 - Python callers can bootstrap panel-aggregated sufficient statistics without materializing row
   indices or copying the input matrix.
+- Callers with predeclared contiguous regimes can preserve every regime's source panel count while
+  retaining the same within-regime dependence model; the engine makes no claim that a particular
+  stratification is statistically appropriate for a given study.
 - Nonlinear metrics such as RMSE remain the caller's explicit transformation of resampled additive
   sums; the engine does not hard-code a paper's estimand or multiplicity procedure.
 - Changing any digital random mapping is a new method identity, not an implementation detail.

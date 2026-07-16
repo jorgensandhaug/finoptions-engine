@@ -259,6 +259,10 @@ impl IntoPyBootstrapError for CoreBootstrapError {
             | CoreBootstrapError::EmptyStatistics
             | CoreBootstrapError::ShapeOverflow { .. }
             | CoreBootstrapError::ShapeMismatch { .. }
+            | CoreBootstrapError::StratumOffsetCount { .. }
+            | CoreBootstrapError::StratumOffsetsDoNotStartAtZero { .. }
+            | CoreBootstrapError::InvalidStratumRange { .. }
+            | CoreBootstrapError::StratumOffsetEndMismatch { .. }
             | CoreBootstrapError::NonFiniteInput { .. }
             | CoreBootstrapError::PanelCountExceedsExactF64Maximum { .. }
             | CoreBootstrapError::ZeroReplications
@@ -914,6 +918,44 @@ fn stationary_bootstrap_panel_sums_f64<'py>(
     let core_executor = &executor.inner;
     let result = py
         .detach(move || inputs.stationary_bootstrap_sums(spec, core_executor))
+        .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let rows = result.replications();
+    let columns = result.statistics();
+    let array = Array2::from_shape_vec((rows, columns), result.into_vec())
+        .map_err(|error| BootstrapError::new_err(error.to_string()))?;
+    Ok(array.into_pyarray(py))
+}
+
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[pyfunction]
+fn stationary_bootstrap_stratified_panel_sums_f64<'py>(
+    py: Python<'py>,
+    panel_statistics: PyReadonlyArray2<'py, f64>,
+    stratum_offsets: PyReadonlyArray1<'py, u64>,
+    executor: PyRef<'py, NativeCpuExecutor>,
+    replications: usize,
+    mean_block_length: f64,
+    seed: u64,
+    domain: u32,
+    replication_path_start: u32,
+) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let shape = panel_statistics.shape();
+    let panels = shape[0];
+    let statistics = shape[1];
+    let values = panel_statistics.as_slice()?;
+    let offsets = stratum_offsets.as_slice()?;
+    let inputs = CoreAdditivePanelStatistics::try_new(values, panels, statistics)
+        .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let spec = CoreStationaryBootstrapSpec::try_new(
+        replications,
+        mean_block_length,
+        CoreRandomStream::new(seed, domain),
+        replication_path_start,
+    )
+    .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
+    let core_executor = &executor.inner;
+    let result = py
+        .detach(move || inputs.stationary_bootstrap_stratified_sums(offsets, spec, core_executor))
         .map_err(CoreBootstrapError::into_py_bootstrap_error)?;
     let rows = result.replications();
     let columns = result.statistics();
@@ -2136,6 +2178,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(simulate_gbm_seeded_f64, module)?)?;
     module.add_function(wrap_pyfunction!(
         stationary_bootstrap_panel_sums_f64,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        stationary_bootstrap_stratified_panel_sums_f64,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(price_lsm_call_seeded_f64, module)?)?;

@@ -49,6 +49,44 @@ pub enum BootstrapError {
         statistics: usize,
     },
 
+    /// A stratified request needs at least one `[start, end)` range.
+    #[error(
+        "stratified stationary bootstrap requires at least two stratum offsets; observed {observed}"
+    )]
+    StratumOffsetCount {
+        /// Rejected offset count.
+        observed: usize,
+    },
+
+    /// Contiguous stratum offsets must begin at the first panel.
+    #[error("stratum offsets must start at zero; observed {observed}")]
+    StratumOffsetsDoNotStartAtZero {
+        /// Rejected first offset.
+        observed: u64,
+    },
+
+    /// Every stratum must contain at least one panel and follow its predecessor.
+    #[error(
+        "stratum {stratum} has invalid range [{start}, {end}); offsets must be strictly increasing"
+    )]
+    InvalidStratumRange {
+        /// Zero-based stratum index.
+        stratum: usize,
+        /// Rejected inclusive start.
+        start: u64,
+        /// Rejected exclusive end.
+        end: u64,
+    },
+
+    /// Contiguous strata must cover every source panel exactly once.
+    #[error("final stratum offset is {observed}; expected panel count {expected}")]
+    StratumOffsetEndMismatch {
+        /// Rejected final offset.
+        observed: u64,
+        /// Required final offset.
+        expected: u64,
+    },
+
     /// A source statistic cannot enter a checked floating-point reduction.
     #[error("panel {panel} statistic {statistic} must be finite; observed {observed:?}")]
     NonFiniteInput {
@@ -237,6 +275,12 @@ pub struct AdditivePanelStatistics<'a> {
     statistics: usize,
 }
 
+#[derive(Clone, Copy)]
+enum PanelResamplingLayout<'a> {
+    Whole,
+    Strata(&'a [usize]),
+}
+
 impl<'a> AdditivePanelStatistics<'a> {
     /// Validates a finite row-major `panels x statistics` matrix without copying it.
     ///
@@ -319,6 +363,43 @@ impl<'a> AdditivePanelStatistics<'a> {
         executor: &CpuExecutor,
     ) -> Result<PanelBootstrapSums, BootstrapError> {
         let prefix = self.build_prefix()?;
+        self.bootstrap_sums_from_prefix(&prefix, PanelResamplingLayout::Whole, spec, executor)
+    }
+
+    /// Resamples circular geometric blocks independently inside contiguous source strata.
+    ///
+    /// `stratum_offsets` must be a strictly increasing partition `[0, ..., panels]`. Every
+    /// replication preserves the exact number of panel positions from every stratum, while block
+    /// origins wrap only inside their own stratum. One Philox path owns the complete fixed-order
+    /// stratum sequence, so output remains invariant to executor width.
+    ///
+    /// # Errors
+    ///
+    /// Returns before sampling when offsets do not define a complete nonempty partition, or on the
+    /// same allocation, prefix, and finite-domain failures as [`Self::stationary_bootstrap_sums`].
+    pub fn stationary_bootstrap_stratified_sums(
+        self,
+        stratum_offsets: &[u64],
+        spec: StationaryBootstrapSpec,
+        executor: &CpuExecutor,
+    ) -> Result<PanelBootstrapSums, BootstrapError> {
+        let strata = self.validate_strata(stratum_offsets)?;
+        let prefix = self.build_prefix()?;
+        self.bootstrap_sums_from_prefix(
+            &prefix,
+            PanelResamplingLayout::Strata(&strata),
+            spec,
+            executor,
+        )
+    }
+
+    fn bootstrap_sums_from_prefix(
+        self,
+        prefix: &[f64],
+        layout: PanelResamplingLayout<'_>,
+        spec: StationaryBootstrapSpec,
+        executor: &CpuExecutor,
+    ) -> Result<PanelBootstrapSums, BootstrapError> {
         let replications = spec.replications as usize;
         let elements = replications.checked_mul(self.statistics).ok_or(
             BootstrapError::ResultAllocationFailed {
@@ -332,14 +413,45 @@ impl<'a> AdditivePanelStatistics<'a> {
         values.resize(elements, 0.0);
         executor.dispatch_mut(
             &mut values,
-            |output| self.fill_serial(&prefix, spec, output),
-            |output| self.fill_parallel(&prefix, spec, output),
+            |output| self.fill_serial(prefix, layout, spec, output),
+            |output| self.fill_parallel(prefix, layout, spec, output),
         )?;
         Ok(PanelBootstrapSums {
             values,
             replications,
             statistics: self.statistics,
         })
+    }
+
+    fn validate_strata(self, offsets: &[u64]) -> Result<Box<[usize]>, BootstrapError> {
+        if offsets.len() < 2 {
+            return Err(BootstrapError::StratumOffsetCount {
+                observed: offsets.len(),
+            });
+        }
+        if offsets[0] != 0 {
+            return Err(BootstrapError::StratumOffsetsDoNotStartAtZero {
+                observed: offsets[0],
+            });
+        }
+        for (stratum, pair) in offsets.windows(2).enumerate() {
+            if pair[0] >= pair[1] {
+                return Err(BootstrapError::InvalidStratumRange {
+                    stratum,
+                    start: pair[0],
+                    end: pair[1],
+                });
+            }
+        }
+        let expected = u64::try_from(self.panels).expect("validated panel count fits u64");
+        let observed = *offsets.last().expect("validated nonempty offsets");
+        if observed != expected {
+            return Err(BootstrapError::StratumOffsetEndMismatch { observed, expected });
+        }
+        Ok(offsets
+            .iter()
+            .map(|&offset| usize::try_from(offset).expect("validated offset fits usize"))
+            .collect())
     }
 
     fn build_prefix(self) -> Result<Vec<f64>, BootstrapError> {
@@ -382,11 +494,12 @@ impl<'a> AdditivePanelStatistics<'a> {
     fn fill_serial(
         self,
         prefix: &[f64],
+        layout: PanelResamplingLayout<'_>,
         spec: StationaryBootstrapSpec,
         values: &mut [f64],
     ) -> Result<(), BootstrapError> {
         for (replication, output) in values.chunks_mut(self.statistics).enumerate() {
-            self.fill_replication(prefix, spec, replication, output)?;
+            self.fill_replication(prefix, layout, spec, replication, output)?;
         }
         Ok(())
     }
@@ -394,6 +507,7 @@ impl<'a> AdditivePanelStatistics<'a> {
     fn fill_parallel(
         self,
         prefix: &[f64],
+        layout: PanelResamplingLayout<'_>,
         spec: StationaryBootstrapSpec,
         values: &mut [f64],
     ) -> Result<(), BootstrapError> {
@@ -406,7 +520,7 @@ impl<'a> AdditivePanelStatistics<'a> {
                     return;
                 }
                 if self
-                    .fill_replication(prefix, spec, replication, output)
+                    .fill_replication(prefix, layout, spec, replication, output)
                     .is_err()
                 {
                     first_failure.fetch_min(replication, Ordering::Relaxed);
@@ -419,6 +533,7 @@ impl<'a> AdditivePanelStatistics<'a> {
         let start = failed * self.statistics;
         match self.fill_replication(
             prefix,
+            layout,
             spec,
             failed,
             &mut values[start..start + self.statistics],
@@ -433,6 +548,7 @@ impl<'a> AdditivePanelStatistics<'a> {
     fn fill_replication(
         self,
         prefix: &[f64],
+        layout: PanelResamplingLayout<'_>,
         spec: StationaryBootstrapSpec,
         replication: usize,
         output: &mut [f64],
@@ -444,16 +560,27 @@ impl<'a> AdditivePanelStatistics<'a> {
             .checked_add(replication_u32)
             .expect("validated replication path range");
         let mut stream = PhiloxPathStream::new(spec.stream.seed(), spec.stream.domain(), path, 0);
-        let mut remaining = self.panels;
-        while remaining != 0 {
-            let origin = usize::try_from(sample_bounded_u64(
+        match layout {
+            PanelResamplingLayout::Whole => self.fill_range(
+                prefix,
+                0,
+                self.panels,
+                spec.mean_block_length,
                 &mut stream,
-                u64::try_from(self.panels).expect("panel count fits u64"),
-            ))
-            .expect("sampled origin fits usize");
-            let length = sample_geometric_length(&mut stream, spec.mean_block_length, remaining);
-            self.add_circular_block(prefix, origin, length, output);
-            remaining -= length;
+                output,
+            ),
+            PanelResamplingLayout::Strata(strata) => {
+                for pair in strata.windows(2) {
+                    self.fill_range(
+                        prefix,
+                        pair[0],
+                        pair[1],
+                        spec.mean_block_length,
+                        &mut stream,
+                        output,
+                    );
+                }
+            }
         }
         if let Some((statistic, &observed)) = output
             .iter()
@@ -469,12 +596,46 @@ impl<'a> AdditivePanelStatistics<'a> {
         Ok(())
     }
 
-    fn add_circular_block(self, prefix: &[f64], origin: usize, length: usize, output: &mut [f64]) {
-        debug_assert!(origin < self.panels);
-        debug_assert!((1..=self.panels).contains(&length));
+    fn fill_range(
+        self,
+        prefix: &[f64],
+        range_start: usize,
+        range_end: usize,
+        mean_block_length: f64,
+        stream: &mut PhiloxPathStream,
+        output: &mut [f64],
+    ) {
+        let panels = range_end - range_start;
+        let mut remaining = panels;
+        while remaining != 0 {
+            let origin = usize::try_from(sample_bounded_u64(
+                stream,
+                u64::try_from(panels).expect("range panel count fits u64"),
+            ))
+            .expect("sampled origin fits usize");
+            let length = sample_geometric_length(stream, mean_block_length, remaining);
+            self.add_circular_range_block(prefix, range_start, range_end, origin, length, output);
+            remaining -= length;
+        }
+    }
+
+    fn add_circular_range_block(
+        self,
+        prefix: &[f64],
+        range_start: usize,
+        range_end: usize,
+        relative_origin: usize,
+        length: usize,
+        output: &mut [f64],
+    ) {
+        let panels = range_end - range_start;
+        debug_assert!(range_start < range_end && range_end <= self.panels);
+        debug_assert!(relative_origin < panels);
+        debug_assert!((1..=panels).contains(&length));
         debug_assert_eq!(output.len(), self.statistics);
+        let origin = range_start + relative_origin;
         let end = origin + length;
-        if end <= self.panels {
+        if end <= range_end {
             let origin_start = origin * self.statistics;
             let end_start = end * self.statistics;
             for statistic in 0..self.statistics {
@@ -484,11 +645,15 @@ impl<'a> AdditivePanelStatistics<'a> {
             return;
         }
         let origin_start = origin * self.statistics;
-        let panel_end_start = self.panels * self.statistics;
-        let wrapped_end_start = (end - self.panels) * self.statistics;
+        let range_end_start = range_end * self.statistics;
+        let wrapped_end = range_start + end - range_end;
+        let range_start_index = range_start * self.statistics;
+        let wrapped_end_start = wrapped_end * self.statistics;
         for statistic in 0..self.statistics {
-            let tail = prefix[panel_end_start + statistic] - prefix[origin_start + statistic];
-            output[statistic] += tail + prefix[wrapped_end_start + statistic];
+            let tail = prefix[range_end_start + statistic] - prefix[origin_start + statistic];
+            let head =
+                prefix[wrapped_end_start + statistic] - prefix[range_start_index + statistic];
+            output[statistic] += tail + head;
         }
     }
 }
@@ -687,6 +852,70 @@ mod tests {
     }
 
     #[test]
+    fn stratified_bootstrap_preserves_every_stratum_and_executor_identity() {
+        let values = [
+            1.0, 10.0, 1.0, 1.0, 10.0, 2.0, 1.0, 100.0, 4.0, 1.0, 100.0, 8.0, 1.0, 100.0, 16.0,
+            1.0, 100.0, 32.0,
+        ];
+        let statistics = AdditivePanelStatistics::try_new(&values, 6, 3).unwrap();
+        let request = spec(1_003, 3.0);
+        let serial = statistics
+            .stationary_bootstrap_stratified_sums(
+                &[0, 2, 6],
+                request,
+                &CpuExecutor::try_new(1).unwrap(),
+            )
+            .unwrap();
+        let parallel = statistics
+            .stationary_bootstrap_stratified_sums(
+                &[0, 2, 6],
+                request,
+                &CpuExecutor::try_new(4).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(serial, parallel);
+        assert!(serial.as_slice().chunks(3).all(|row| {
+            row[0].to_bits() == 6.0_f64.to_bits() && row[1].to_bits() == 420.0_f64.to_bits()
+        }));
+        assert!(
+            serial
+                .as_slice()
+                .chunks(3)
+                .map(|row| row[2].to_bits())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        );
+    }
+
+    #[test]
+    fn stratified_bootstrap_rejects_incomplete_or_empty_partitions() {
+        let values = [1.0, 2.0, 3.0];
+        let statistics = AdditivePanelStatistics::try_new(&values, 3, 1).unwrap();
+        let executor = CpuExecutor::try_new(1).unwrap();
+        assert!(matches!(
+            statistics.stationary_bootstrap_stratified_sums(&[0], spec(1, 2.0), &executor),
+            Err(BootstrapError::StratumOffsetCount { observed: 1 })
+        ));
+        assert!(matches!(
+            statistics.stationary_bootstrap_stratified_sums(&[1, 3], spec(1, 2.0), &executor),
+            Err(BootstrapError::StratumOffsetsDoNotStartAtZero { observed: 1 })
+        ));
+        assert!(matches!(
+            statistics
+                .stationary_bootstrap_stratified_sums(&[0, 2, 2, 3], spec(1, 2.0), &executor,),
+            Err(BootstrapError::InvalidStratumRange { stratum: 1, .. })
+        ));
+        assert!(matches!(
+            statistics.stationary_bootstrap_stratified_sums(&[0, 2], spec(1, 2.0), &executor),
+            Err(BootstrapError::StratumOffsetEndMismatch {
+                observed: 2,
+                expected: 3,
+            })
+        ));
+    }
+
+    #[test]
     fn prefix_kernel_matches_a_naive_panel_walk() {
         let values = [1.0, 10.0, 2.0, 20.0, 4.0, 40.0, 8.0, 80.0, 16.0, 160.0];
         let statistics = AdditivePanelStatistics::try_new(&values, 5, 2).unwrap();
@@ -713,6 +942,51 @@ mod tests {
                     output[1] += values[panel * 2 + 1];
                 }
                 remaining -= length;
+            }
+        }
+        assert_eq!(fast.as_slice(), naive);
+    }
+
+    #[test]
+    fn stratified_prefix_kernel_matches_a_naive_within_stratum_walk() {
+        let values = [1.0, 10.0, 2.0, 20.0, 4.0, 40.0, 8.0, 80.0, 16.0, 160.0];
+        let statistics = AdditivePanelStatistics::try_new(&values, 5, 2).unwrap();
+        let request = spec(101, 3.0);
+        let offsets = [0_u64, 2, 5];
+        let fast = statistics
+            .stationary_bootstrap_stratified_sums(
+                &offsets,
+                request,
+                &CpuExecutor::try_new(1).unwrap(),
+            )
+            .unwrap();
+        let mut naive = vec![0.0; fast.as_slice().len()];
+        for (replication, output) in naive.chunks_mut(2).enumerate() {
+            let mut stream = PhiloxPathStream::new(
+                request.stream.seed(),
+                request.stream.domain(),
+                u32::try_from(replication).unwrap(),
+                0,
+            );
+            for pair in offsets.windows(2) {
+                let start = usize::try_from(pair[0]).unwrap();
+                let panels = usize::try_from(pair[1] - pair[0]).unwrap();
+                let mut remaining = panels;
+                while remaining != 0 {
+                    let origin = usize::try_from(sample_bounded_u64(
+                        &mut stream,
+                        u64::try_from(panels).unwrap(),
+                    ))
+                    .unwrap();
+                    let length =
+                        sample_geometric_length(&mut stream, request.mean_block_length, remaining);
+                    for offset in 0..length {
+                        let panel = start + (origin + offset) % panels;
+                        output[0] += values[panel * 2];
+                        output[1] += values[panel * 2 + 1];
+                    }
+                    remaining -= length;
+                }
             }
         }
         assert_eq!(fast.as_slice(), naive);
