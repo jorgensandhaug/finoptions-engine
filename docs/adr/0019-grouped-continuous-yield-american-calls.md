@@ -66,6 +66,12 @@ symmetry, dense 8,192-step CRR comparisons including a negative call rate, Gauss
 nonmonotone PCHIP interval bounds, exact origin stopping payoff, bounded obstacle projection,
 malformed domains, and bitwise serial/parallel equality.
 
+The independent-tree cases also include rounded synthetic envelopes for the study's unusual but
+valid short-maturity/high-yield and high-volatility regimes: annualized yield `3.10` at three days,
+and volatility `0.84` at yield `0.105`. The original cases retain a `$0.0003` absolute gate; the
+high-volatility envelope uses `$0.0005` because the finite 8,192-step tree itself differs by about
+`$0.00039`. No licensed row or option-price target is embedded in the test.
+
 The target-free recovered-cohort pilot used 96,666 natural groups and 678,122 contracts. The paper
 profile `(boundary order=13, iterations=16, collocation nodes=6, price order=21, boundary
 residual=1e-4, obstacle projection=1e-6)` completed in 0.563 seconds for forecast yields and 0.891

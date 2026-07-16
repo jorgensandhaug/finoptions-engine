@@ -22,10 +22,12 @@ plus `f64` child values. Padded sequences and time bins are created only when re
 Prerequisites are `uv`, Rust 1.97.0, and `just`.
 
 ```shell
-just sync
 just test
 just check
 ```
+
+Each supported command first makes the locked `uv` environment current; a fresh checkout does not
+require a separate bootstrap step.
 
 ## Validated specifications
 

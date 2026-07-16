@@ -1,16 +1,16 @@
 set shell := ["zsh", "-cu"]
 
 sync:
-    uv sync --all-groups
+    uv sync --all-groups --locked
 
-native profile="dev-fast":
+native profile="dev-fast": sync
     uv run --no-sync maturin develop --profile {{profile}}
 
-fmt:
+fmt: sync
     cargo fmt --all
     uv run --no-sync ruff format .
 
-check:
+check: sync
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace --all-features --exclude finoptions-python --lib --bins --tests --examples

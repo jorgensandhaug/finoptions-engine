@@ -479,10 +479,10 @@ impl LsmCallEstimator {
         math_backend: CpuMathBackend,
     ) -> Result<(ExerciseRule, ExerciseFitDiagnostics), LsmError> {
         candidate_population.clear();
-        for (&spot, &value) in spots.iter().zip(&*values) {
+        for (path, (&spot, &value)) in spots.iter().zip(&*values).enumerate() {
             if spot > self.strike {
                 let moneyness = spot / self.strike;
-                candidate_population.push(moneyness, value);
+                candidate_population.push_indexed(path, moneyness, value);
             }
         }
         if candidate_population.is_empty() {
@@ -528,7 +528,7 @@ impl LsmCallEstimator {
                 source,
             })?;
         let diagnostics = model.diagnostics();
-        self.apply_training_rule(node, spots, values, &model)?;
+        self.apply_training_rule(node, spots, values, candidate_population, &model)?;
         debug_assert!(in_the_money_paths <= training_count);
         Ok((
             ExerciseRule::Regression(model),
@@ -544,14 +544,25 @@ impl LsmCallEstimator {
         node: NodeId,
         spots: &[f64],
         values: &mut [f64],
+        candidate_population: &RegressionPopulation,
         model: &PolynomialModel,
     ) -> Result<(), LsmError> {
         match model.degree() {
-            0 => self.apply_training_rule_for::<0>(node, spots, values, model),
-            1 => self.apply_training_rule_for::<1>(node, spots, values, model),
-            2 => self.apply_training_rule_for::<2>(node, spots, values, model),
-            3 => self.apply_training_rule_for::<3>(node, spots, values, model),
-            4 => self.apply_training_rule_for::<4>(node, spots, values, model),
+            0 => {
+                self.apply_training_rule_for::<0>(node, spots, values, candidate_population, model)
+            }
+            1 => {
+                self.apply_training_rule_for::<1>(node, spots, values, candidate_population, model)
+            }
+            2 => {
+                self.apply_training_rule_for::<2>(node, spots, values, candidate_population, model)
+            }
+            3 => {
+                self.apply_training_rule_for::<3>(node, spots, values, candidate_population, model)
+            }
+            4 => {
+                self.apply_training_rule_for::<4>(node, spots, values, candidate_population, model)
+            }
             _ => unreachable!("validated polynomial model has degree zero through four"),
         }
     }
@@ -561,23 +572,29 @@ impl LsmCallEstimator {
         node: NodeId,
         spots: &[f64],
         values: &mut [f64],
+        candidate_population: &RegressionPopulation,
         model: &PolynomialModel,
     ) -> Result<(), LsmError> {
-        for (path, (&spot, value)) in spots.iter().zip(values).enumerate() {
-            if spot <= self.strike {
-                continue;
-            }
+        debug_assert_eq!(
+            candidate_population.len(),
+            candidate_population.source_indices().len()
+        );
+        for (&path, &moneyness) in candidate_population
+            .source_indices()
+            .iter()
+            .zip(candidate_population.predictors())
+        {
+            let spot = spots[path];
             let intrinsic = spot - self.strike;
-            let continuation =
-                model
-                    .predict_for::<DEGREE>(spot / self.strike)
-                    .map_err(|source| LsmError::PredictionAtPath {
-                        node: node.get(),
-                        path,
-                        source,
-                    })?;
+            let continuation = model.predict_for::<DEGREE>(moneyness).map_err(|source| {
+                LsmError::PredictionAtPath {
+                    node: node.get(),
+                    path,
+                    source,
+                }
+            })?;
             if self.tie_rule.should_exercise(intrinsic, continuation) {
-                *value = intrinsic;
+                values[path] = intrinsic;
             }
         }
         Ok(())
@@ -1182,6 +1199,63 @@ mod tests {
         )
         .unwrap();
         (plan, curve)
+    }
+
+    #[test]
+    fn indexed_training_rule_is_bitwise_equivalent_to_a_full_path_scan() {
+        let (_, curve) = plan(&[0.0, 1.0], &[0.0, 0.0], None, &[]);
+        let node = curve.grid().node_id(1).unwrap();
+        let spots = [
+            80.0, 120.0, 100.0, 101.0, 95.0, 135.0, 110.0, 99.0, 160.0, 105.0,
+        ];
+        let initial_values = [0.25, 25.0, 0.50, 4.0, 0.75, 30.0, 14.0, 1.0, 54.0, 8.0];
+
+        for degree in 0..=4 {
+            let regression = PolynomialRegressionSpec::try_new(
+                PolynomialDegree::try_new(degree).unwrap(),
+                1.0e-12,
+                1.0e8,
+            )
+            .unwrap();
+            let estimator = LsmCallEstimator::try_new(
+                100.0,
+                regression,
+                ExerciseTieRule::StrictlyGreater,
+                InsufficientExerciseSupportPolicy::Fail,
+            )
+            .unwrap();
+            let mut candidates = RegressionPopulation::new(regression);
+            for (path, (&spot, &value)) in spots.iter().zip(&initial_values).enumerate() {
+                if spot > estimator.strike {
+                    candidates.push_indexed(path, spot / estimator.strike, value);
+                }
+            }
+            let model = RegressionWorkspace::default()
+                .fit_population(&candidates, CpuMathBackend::RustStdF64)
+                .unwrap();
+
+            let mut expected = initial_values;
+            for (&spot, value) in spots.iter().zip(&mut expected) {
+                if spot <= estimator.strike {
+                    continue;
+                }
+                let intrinsic = spot - estimator.strike;
+                let continuation = model.predict(spot / estimator.strike).unwrap();
+                if estimator.tie_rule.should_exercise(intrinsic, continuation) {
+                    *value = intrinsic;
+                }
+            }
+
+            let mut observed = initial_values;
+            estimator
+                .apply_training_rule(node, &spots, &mut observed, &candidates, &model)
+                .unwrap();
+            assert_eq!(
+                observed.map(f64::to_bits),
+                expected.map(f64::to_bits),
+                "degree={degree}"
+            );
+        }
     }
 
     fn assert_close(actual: f64, expected: f64, tolerance: f64) {

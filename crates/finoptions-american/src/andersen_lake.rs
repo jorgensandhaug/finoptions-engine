@@ -1402,13 +1402,15 @@ mod tests {
     #[test]
     fn fixed_point_prices_agree_with_independent_dense_american_trees() {
         let cases = [
-            (100.0, 100.0, 1.0, 0.03, 0.05, 0.25),
-            (100.0, 100.0, 0.5, -0.01, 0.0, 0.30),
-            (100.0, 90.0, 0.75, 0.08, 0.03, 0.20),
-            (100.0, 120.0, 0.25, 0.01, 0.10, 0.50),
+            (100.0, 100.0, 1.0, 0.03, 0.05, 0.25, 3.0e-4),
+            (100.0, 100.0, 0.5, -0.01, 0.0, 0.30, 3.0e-4),
+            (100.0, 90.0, 0.75, 0.08, 0.03, 0.20, 3.0e-4),
+            (100.0, 120.0, 0.25, 0.01, 0.10, 0.50, 3.0e-4),
+            (100.0, 98.0, 3.0 / 365.0, 0.0008, 3.10, 0.28, 3.0e-4),
+            (100.0, 83.0, 0.47, 0.0012, 0.105, 0.84, 5.0e-4),
         ];
         let method = medium_method(1.0e-5);
-        for (spot, strike, maturity, rate, yield_rate, volatility) in cases {
+        for (spot, strike, maturity, rate, yield_rate, volatility, tolerance) in cases {
             let spots = [spot];
             let maturities = [maturity];
             let rates = [rate];
@@ -1431,7 +1433,7 @@ mod tests {
             let independent =
                 independent_crr_call(spot, strike, maturity, rate, yield_rate, volatility, 8_192);
             assert!(
-                (observed - independent).abs() <= 3.0e-4,
+                (observed - independent).abs() <= tolerance,
                 "observed={observed}, independent={independent}, case={:?}",
                 (spot, strike, maturity, rate, yield_rate, volatility),
             );

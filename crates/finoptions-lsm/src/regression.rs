@@ -237,6 +237,7 @@ pub(crate) struct RegressionPopulation {
     spec: PolynomialRegressionSpec,
     predictors: Vec<f64>,
     responses: Vec<f64>,
+    source_indices: Vec<usize>,
     count: f64,
     predictor_mean: f64,
     predictor_m2: f64,
@@ -250,6 +251,7 @@ impl RegressionPopulation {
             spec,
             predictors: Vec::new(),
             responses: Vec::new(),
+            source_indices: Vec::new(),
             count: 0.0,
             predictor_mean: 0.0,
             predictor_m2: 0.0,
@@ -261,6 +263,7 @@ impl RegressionPopulation {
     pub(crate) fn clear(&mut self) {
         self.predictors.clear();
         self.responses.clear();
+        self.source_indices.clear();
         self.count = 0.0;
         self.predictor_mean = 0.0;
         self.predictor_m2 = 0.0;
@@ -268,10 +271,16 @@ impl RegressionPopulation {
         self.first_non_finite_response = None;
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn push(&mut self, predictor: f64, response: f64) {
+        self.push_indexed(self.predictors.len(), predictor, response);
+    }
+
+    pub(crate) fn push_indexed(&mut self, source_index: usize, predictor: f64, response: f64) {
         let index = self.predictors.len();
         self.predictors.push(predictor);
         self.responses.push(response);
+        self.source_indices.push(source_index);
         if !predictor.is_finite() {
             self.first_non_finite_predictor
                 .get_or_insert((index, predictor));
@@ -293,6 +302,14 @@ impl RegressionPopulation {
 
     pub(crate) fn len(&self) -> usize {
         self.predictors.len()
+    }
+
+    pub(crate) fn predictors(&self) -> &[f64] {
+        &self.predictors
+    }
+
+    pub(crate) fn source_indices(&self) -> &[usize] {
+        &self.source_indices
     }
 
     fn location_scale(&self) -> Result<(f64, f64), RegressionError> {

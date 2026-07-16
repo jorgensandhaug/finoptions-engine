@@ -26,6 +26,15 @@ Three narrower candidates were measured and completely removed:
 - replacing path-level moneyness division with reciprocal multiplication produced no detectable
   change (−0.99% to +1.82%, `p = 0.55`) and would have complicated the extreme valid-strike domain.
 
+A later target-free probe also rejected fusing location, scale, and standardization through
+Apple's `vDSP_normalizeD`. Although the primitive returned the expected population standard
+deviation for `[0, 2, 4, 6]`, it returned zero scale and NaN standardized outputs for 500 distinct
+representable values `100 + i * 1e-10`. A high-precision calculation over those exact binary64
+inputs gives population standard deviation `1.4433727911925833e-8`. It likewise returned zero for
+32,768 values `1e16 + 2i`, whose exact-input population standard deviation is
+`18918.613611995992`. That cancellation behavior would misclassify valid near-degenerate
+regressions, so no normalization wrapper or runtime branch was added.
+
 No API, FFI wrapper, alternate arithmetic route, or dead benchmark from those candidates remains.
 
 ## Accepted design
@@ -56,6 +65,34 @@ pass is not an Apple optimization: the production benefit comes from merging it 
 required ITM selection pass. A scalar end-to-end A/B was invalidated after foreground load widened
 the old estimate to `2.25--3.90 s` and made Criterion forecast an 87-second candidate sample; those
 numbers are not evidence.
+
+### Indexed stopping-policy application
+
+A later profile showed that the training stopping rule rescanned every simulated path, repeated
+the in-the-money comparison, and divided spot by strike even though population selection had
+already produced exactly the ordered in-the-money predictors. The retained extension records each
+accepted path index beside its predictor. After fitting, policy application traverses that same
+population and updates the indexed value slots. Population selection, predictor values, fitted
+model, prediction order, exercise tie rule, and path values are otherwise unchanged. A
+degree-zero-through-four differential test proves bitwise-equal resulting value vectors against
+the original full-path scan.
+
+Three prebuilt binaries isolated the accepted `d7f8a6b` baseline, the indexed candidate, and an
+indexed candidate that also replaced evaluation Welford moments. Their SHA-256 digests were
+`11f4021308f1d04d8025abd906a7a06238e234a959d068990bc15c2e02bf7fdd`,
+`1a1e39bfa0f5c9ea146a5bb272ba8ccb6447442189f26b91fd1c3e7a239f8e66`, and
+`966e27b5f417b5c3ba6ffd4a06651733cc7bdf2e3d124ea88f875cc544c88a78`, respectively. The complete
+one-thread Apple workload ran in the order old, indexed, indexed-plus-moments,
+indexed-plus-moments, indexed, old. Center estimates were `1.4512`, `1.3823`, `1.3864`, `1.3876`,
+`1.3799`, and `1.4797` seconds. The indexed candidate reduced the paired centers by 4.75% and
+6.75%, or 5.76% across the two center means.
+
+The alternate moment reducer was removed. Its one-thread centers were 0.30% and 0.56% slower than
+the adjacent indexed candidate. Eight-thread runs had material scheduler variance: repeated
+centers for the same binaries moved between roughly `237` and `283` ms and reversed the apparent
+moment-kernel ordering. Those measurements cannot support a production change. The original
+single-pass Welford evaluation remains; no alternate moment route or test-only production branch
+is retained.
 
 ## Correctness gates
 
